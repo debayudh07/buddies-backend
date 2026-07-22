@@ -1,0 +1,537 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// System of record = Supabase Postgres (not a separate DB product).
+// Set DATABASE_URL / DIRECT_URL from Supabase → Project Settings → Database.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  consumer
+  supplier
+  admin
+}
+
+enum KycStatus {
+  draft
+  submitted
+  verified
+  rejected
+}
+
+enum SubscriptionPlan {
+  consumer_standard
+  supplier_standard
+  supplier_premium
+}
+
+enum BidRequestStatus {
+  open
+  awarded
+  expired
+  cancelled
+  threshold_met
+}
+
+enum BidStatus {
+  active
+  withdrawn
+  rejected
+  accepted
+  expired
+}
+
+enum OrderStatus {
+  placed
+  bid_accepted
+  preparing
+  out_for_delivery
+  arrived
+  inspection_pending
+  challan_signed
+  rejected_on_spot
+  delivered
+  closed
+}
+
+enum OfflinePaymentStatus {
+  not_started
+  initiated
+  marked_paid_by_consumer
+  confirmed_by_supplier
+  disputed
+}
+
+enum ReturnClaimStatus {
+  draft
+  submitted
+  auto_approved
+  supplier_review
+  approved
+  rejected
+  closed
+}
+
+enum FeeAllocation {
+  none
+  supplier_bears_reverse
+  consumer_restocking_15pct
+}
+
+enum SupportTicketStatus {
+  open
+  pending_user
+  pending_ops
+  resolved
+  closed
+}
+
+enum SupportAudience {
+  consumer
+  supplier
+  both
+}
+
+enum SlaStatus {
+  on_track
+  at_risk
+  breached
+  met
+}
+
+model User {
+  id            String   @id @default(uuid())
+  supabaseId    String?  @unique
+  phone         String?
+  email         String?
+  role          UserRole
+  displayName   String?
+  privacyAcceptedAt DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  consumerProfile ConsumerProfile?
+  supplierProfile SupplierProfile?
+  subscriptions   Subscription[]
+  deviceTokens    DeviceToken[]
+  supportTickets  SupportTicket[]
+  chatMessages    ChatMessage[]
+  supportMessages SupportMessage[]
+}
+
+model ConsumerProfile {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  restaurantName String?
+  addressLine    String?
+  city           String?
+  lat            Float?
+  lng            Float?
+  trustScore     Float    @default(100)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bidRequests  BidRequest[]
+  addresses    Address[]
+}
+
+model Address {
+  id         String   @id @default(uuid())
+  consumerId String
+  label      String
+  line       String
+  city       String?
+  lat        Float?
+  lng        Float?
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  consumer ConsumerProfile @relation(fields: [consumerId], references: [id], onDelete: Cascade)
+}
+
+model SupplierProfile {
+  id                 String    @id @default(uuid())
+  userId             String    @unique
+  businessName       String
+  ownerName          String
+  ownerPhone         String
+  gstin              String?
+  aadhaarRef         String?
+  shopAddressPrivate String
+  publicLabel        String
+  lat                Float?
+  lng                Float?
+  kycStatus          KycStatus @default(draft)
+  rating             Float     @default(5)
+  onTimeRate         Float     @default(100)
+  returnRate         Float     @default(0)
+  challanAdjustRate  Float     @default(0)
+  responseTimeSec    Float     @default(0)
+  categories         String[]  @default([])
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bids  Bid[]
+}
+
+model Subscription {
+  id        String           @id @default(uuid())
+  userId    String
+  plan      SubscriptionPlan
+  active    Boolean          @default(true)
+  startsAt  DateTime         @default(now())
+  endsAt    DateTime?
+  introPrice Boolean         @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, active])
+}
+
+model BidRequest {
+  id              String           @id @default(uuid())
+  batchCode       String           @unique
+  consumerId      String
+  status          BidRequestStatus @default(open)
+  budgetPaise     Int?
+  durationHours   Int              @default(24)
+  deliveryWindow  String?
+  privacyAccepted Boolean          @default(false)
+  liveEndsAt      DateTime
+  extendCount     Int              @default(0)
+  minDecrementPaise Int            @default(10000)
+  winningBidId    String?
+  reorderOfId     String?
+  lat             Float?
+  lng             Float?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  consumer ConsumerProfile  @relation(fields: [consumerId], references: [id])
+  items    BidRequestItem[]
+  bids     Bid[]
+  order    Order?
+  standing StandingRfq?
+}
+
+model BidRequestItem {
+  id              String  @id @default(uuid())
+  bidRequestId    String
+  name            String
+  quantity        Float
+  unit            String
+  productCategory String?
+  gradeHint       String?
+
+  bidRequest BidRequest @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+}
+
+model Bid {
+  id              String    @id @default(uuid())
+  bidRequestId    String
+  supplierId      String
+  amountPaise     Int
+  grade           String
+  shelfLifeDays   Int
+  rslDaysAtDelivery Int
+  notes           String?
+  status          BidStatus @default(active)
+  score           Float     @default(0)
+  scoreBreakdown  Json?
+  distanceKm      Float?
+  consumerAckAt   DateTime?
+  supplierAckAt   DateTime?
+  acceptedAt      DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  bidRequest BidRequest      @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+  supplier   SupplierProfile @relation(fields: [supplierId], references: [id])
+  order      Order?
+
+  @@index([bidRequestId, status])
+  @@index([supplierId, status])
+}
+
+model Order {
+  id                String      @id @default(uuid())
+  orderCode         String      @unique
+  bidRequestId      String      @unique
+  bidId             String      @unique
+  consumerUserId    String
+  supplierUserId    String
+  status            OrderStatus @default(placed)
+  slaDeadlineAt     DateTime?
+  slaStatus         SlaStatus   @default(on_track)
+  deliveryLat       Float?
+  deliveryLng       Float?
+  deliveryAddress   String?
+  inspectionEndsAt  DateTime?
+  consumerAckAt     DateTime?
+  supplierAckAt     DateTime?
+  deliveredAt       DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  bidRequest      BidRequest       @relation(fields: [bidRequestId], references: [id])
+  bid             Bid              @relation(fields: [bidId], references: [id])
+  offlinePayment  OfflinePayment?
+  digitalChallan  DigitalChallan?
+  gstInvoice      GstInvoice?
+  chatThread      ChatThread?
+  trackingSession TrackingSession?
+  trackingPoints  TrackingPoint[]
+  returnClaims    ReturnClaim[]
+  statusEvents    OrderStatusEvent[]
+}
+
+model OrderStatusEvent {
+  id        String      @id @default(uuid())
+  orderId   String
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model OfflinePayment {
+  id          String               @id @default(uuid())
+  orderId     String               @unique
+  status      OfflinePaymentStatus @default(not_started)
+  methodNote  String?
+  reference   String?
+  screenshotRef String?
+  initiatedAt DateTime?
+  markedPaidAt DateTime?
+  confirmedAt DateTime?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model DigitalChallan {
+  id              String   @id @default(uuid())
+  orderId         String   @unique
+  lineSnapshotJson Json
+  signedAt        DateTime?
+  signedByUserId  String?
+  signatureRef    String?
+  isDraft         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model GstInvoice {
+  id            String   @id @default(uuid())
+  orderId       String   @unique
+  invoiceNumber String   @unique
+  lineJson      Json
+  pdfRef        String?
+  issuedAt      DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model TrackingSession {
+  id        String    @id @default(uuid())
+  orderId   String    @unique
+  active    Boolean   @default(true)
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  lastPointAt DateTime?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model TrackingPoint {
+  id         String   @id @default(uuid())
+  orderId    String
+  lat        Float
+  lng        Float
+  heading    Float?
+  speed      Float?
+  recordedAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, recordedAt])
+}
+
+model ChatThread {
+  id             String   @id @default(uuid())
+  orderId        String   @unique
+  consumerUserId String
+  supplierUserId String
+  createdAt      DateTime @default(now())
+
+  order    Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+}
+
+model ChatMessage {
+  id         String    @id @default(uuid())
+  threadId   String
+  senderId   String
+  body       String
+  imageRef   String?
+  readAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  thread ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender User       @relation(fields: [senderId], references: [id])
+
+  @@index([threadId, createdAt])
+}
+
+model ReturnClaim {
+  id              String            @id @default(uuid())
+  orderId         String
+  consumerUserId  String
+  supplierUserId  String
+  reasonCode      String
+  productCategory String
+  lineItemIds     String[]
+  notes           String?
+  windowDeadline  DateTime
+  status          ReturnClaimStatus @default(draft)
+  feeAllocation   FeeAllocation     @default(none)
+  mediatorNotes   String?
+  submittedAt     DateTime?
+  decidedAt       DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  order    Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  evidence ReturnEvidence[]
+}
+
+model ReturnEvidence {
+  id           String   @id @default(uuid())
+  claimId      String
+  storageRef   String
+  mediaType    String
+  batchNumber  String?
+  expiryDate   String?
+  defectNote   String?
+  createdAt    DateTime @default(now())
+
+  claim ReturnClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+}
+
+model ShelfLifeMatrix {
+  id                String @id @default(uuid())
+  productCategory   String @unique
+  subCategory       String?
+  totalShelfLifeDays Int
+  minRslDays        Int
+  notes             String?
+}
+
+model ReturnWindowMatrix {
+  id              String @id @default(uuid())
+  productCategory String @unique
+  windowHours     Float
+  validReasons    String[]
+  exampleItems    String?
+}
+
+model SupportCategory {
+  id        String @id @default(uuid())
+  slug      String @unique
+  title     String
+  sortOrder Int    @default(0)
+
+  articles SupportArticle[]
+}
+
+model SupportArticle {
+  id         String           @id @default(uuid())
+  slug       String           @unique
+  title      String
+  bodyMd     String
+  audience   SupportAudience
+  categoryId String?
+  sortOrder  Int              @default(0)
+  published  Boolean          @default(true)
+  updatedAt  DateTime         @updatedAt
+  createdAt  DateTime         @default(now())
+
+  category SupportCategory? @relation(fields: [categoryId], references: [id])
+}
+
+model SupportTicket {
+  id         String              @id @default(uuid())
+  userId     String
+  role       UserRole
+  category   String
+  subject    String
+  status     SupportTicketStatus @default(open)
+  orderId    String?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id])
+  messages SupportMessage[]
+}
+
+model SupportMessage {
+  id         String   @id @default(uuid())
+  ticketId   String
+  senderId   String
+  body       String
+  attachmentRef String?
+  isOps      Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  sender User          @relation(fields: [senderId], references: [id])
+}
+
+model StandingRfq {
+  id           String   @id @default(uuid())
+  consumerId   String
+  bidRequestId String   @unique
+  cronHint     String?
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  bidRequest BidRequest @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String
+  platform  String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, token])
+}
+
+model AuctionConfig {
+  id                     String @id @default("default")
+  baseWindowSec          Int    @default(600)
+  autoExtendTriggerSec   Int    @default(60)
+  autoExtendBySec        Int    @default(120)
+  maxExtends             Int    @default(5)
+  minDecrementPaise      Int    @default(10000)
+  weightPrice            Float  @default(0.45)
+  weightRsl              Float  @default(0.2)
+  weightDistance         Float  @default(0.15)
+  weightOnTime           Float  @default(0.15)
+  weightRating           Float  @default(0.05)
+}

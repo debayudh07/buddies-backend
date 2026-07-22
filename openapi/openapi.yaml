@@ -1,0 +1,356 @@
+openapi: 3.0.3
+info:
+  title: Buddies API
+  version: 1.0.0
+  description: |
+    Dual-sided B2B reverse-auction marketplace API (consumer restaurants + suppliers).
+    Auth: `Authorization: Bearer <supabase_jwt>` or dev `Bearer dev:<role>:<userId>`.
+servers:
+  - url: http://localhost:8000/v1
+tags:
+  - name: shared
+  - name: consumer
+  - name: supplier
+  - name: admin
+paths:
+  /uploads:
+    post:
+      tags: [shared]
+      summary: Upload media to Supabase Storage
+      description: |
+        Multipart field `file`. Query `purpose` = kyc | returns | chat | payments | challans.
+        Persist returned `storageRef` on evidence / chat / payment / challan fields.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: purpose
+          required: true
+          schema: { type: string, enum: [kyc, returns, chat, payments, challans] }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '201': { description: Stored object with storageRef + signedUrl }
+  /uploads/signed-url:
+    get:
+      tags: [shared]
+      summary: Refresh a signed URL for a storageRef
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: storageRef
+          required: true
+          schema: { type: string }
+        - in: query
+          name: ttlSec
+          schema: { type: integer, default: 3600 }
+      responses:
+        '200': { description: signedUrl }
+  /auth/session:
+    post:
+      tags: [shared]
+      summary: Exchange token for app user profile
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Session user }
+  /me:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Current user with profiles }
+  /me/privacy-accept:
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Privacy accepted }
+  /consumer/profile:
+    put:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Upsert consumer profile }
+  /consumer/bid-requests:
+    get:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: List own bid requests }
+    post:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [privacyAccepted, items]
+              properties:
+                privacyAccepted: { type: boolean }
+                budgetPaise: { type: integer }
+                durationHours: { type: integer }
+                deliveryWindow: { type: string }
+                lat: { type: number }
+                lng: { type: number }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, quantity, unit]
+                    properties:
+                      name: { type: string }
+                      quantity: { type: number }
+                      unit: { type: string }
+                      productCategory: { type: string }
+      responses:
+        '201': { description: Bid request created }
+  /consumer/bid-requests/{id}/reorder:
+    post:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201': { description: Cloned auction }
+  /consumer/bid-requests/{id}/bids:
+    get:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Scored bids (multi-attribute) }
+  /consumer/bids/{id}/accept:
+    post:
+      tags: [consumer]
+      summary: Bind-on-accept
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Accepted; dual ack required next }
+  /bids/{id}/acknowledge:
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [consumer, supplier] }
+      responses:
+        '200': { description: Ack; creates order when both done }
+  /supplier/kyc:
+    get:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: KYC profile }
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Upsert KYC }
+  /supplier/kyc/submit:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Submit for verification }
+  /supplier/kyc/dev-verify:
+    post:
+      tags: [supplier]
+      summary: Dev-only verify
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Verified }
+  /supplier/home:
+    get:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Home stats }
+  /supplier/bidzone:
+    get:
+      tags: [supplier]
+      summary: Nearby open demands (masked address)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Bidzone feed }
+  /supplier/bids:
+    get:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: My bids }
+    post:
+      tags: [supplier]
+      summary: Place bid (quota, RSL, min decrement, auto-extend)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Bid placed }
+  /orders/{id}/status:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Status updated; out_for_delivery starts GPS session }
+  /orders/{id}/tracking:
+    post:
+      tags: [supplier]
+      summary: Auto GPS stream point
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Point stored + WS fanout }
+  /orders/{id}/tracking/live:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Latest point + ETA }
+  /orders/{id}/inspection/sign-challan:
+    post:
+      tags: [consumer]
+      summary: Sign digital challan → delivered + GST invoice
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Signed }
+  /orders/{id}/challan:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Digital challan }
+  /orders/{id}/invoice:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: GST invoice }
+  /orders/{id}/payment/start:
+    post:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Offline payment initiated }
+  /orders/{id}/payment/confirm:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Payment confirmed }
+  /orders/{id}/chat/messages:
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Chat message }
+  /orders/{id}/return-claims:
+    post:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Return claim draft }
+  /return-claims/{id}/submit:
+    post:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Submitted / auto-approved }
+  /return-claims/{id}/supplier-decision:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Decision recorded }
+  /returns/policy:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Policy summary }
+  /returns/windows:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Category windows }
+  /catalog/shelf-life-matrix:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: RSL matrix }
+  /support/articles:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Role-scoped FAQ CMS }
+  /support/tickets:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: My tickets }
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Ticket created }
+  /subscriptions:
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Platform subscription (not goods escrow) }
+  /subscriptions/me:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Plan + bid quota }
+  /suppliers/{id}/performance:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Performance ledger aggregates }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+x-socket-io-events:
+  rooms:
+    - auction:{bidRequestId}
+    - chat:{threadId}
+    - tracking:{orderId}
+    - bidzone:all
+  emits:
+    - auction.bid_placed
+    - auction.bid_accepted
+    - order.created
+    - chat.message_created
+    - tracking.location_updated
+    - demand.request_created

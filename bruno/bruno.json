@@ -1,0 +1,14 @@
+{
+  "name": "Buddies API",
+  "version": "1",
+  "items": [],
+  "environments": [
+    {
+      "name": "local",
+      "variables": [
+        { "name": "baseUrl", "value": "http://localhost:3000" },
+        { "name": "token", "value": "dev:consumer:00000000-0000-4000-8000-000000000001" }
+      ]
+    }
+  ]
+}

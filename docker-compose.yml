@@ -1,0 +1,35 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - buddies_redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - '8000:8000'
+    env_file:
+      - .env
+    environment:
+      # Override host Redis with the compose service name
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      PORT: '8000'
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Prefer JSON env for FCM in containers:
+    # FIREBASE_SERVICE_ACCOUNT_JSON: '{...}'
+    restart: unless-stopped
+
+volumes:
+  buddies_redis_data:
