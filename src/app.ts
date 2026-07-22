@@ -17,6 +17,7 @@ import { returnsRouter } from './modules/returns/routes';
 import { supportRouter } from './modules/support/routes';
 import { uploadsRouter } from './modules/uploads/routes';
 import { isFirebaseReady, initFirebase } from './lib/notify';
+import { getRedisStatus, redisPing } from './lib/redis';
 import { config } from './config';
 
 export function createApp() {
@@ -39,9 +40,10 @@ export function createApp() {
     next();
   });
 
-  app.get('/health', (_req, res) => {
-    // Ensure FCM init has been attempted for accurate status
+  app.get('/health', async (_req, res) => {
     if (config.fcmEnabled && !isFirebaseReady()) initFirebase();
+    const redis = getRedisStatus();
+    const redisPingOk = redis.configured ? await redisPing() : false;
     res.json({
       ok: true,
       service: 'buddies-api',
@@ -49,6 +51,10 @@ export function createApp() {
       fcm: {
         enabled: config.fcmEnabled,
         ready: isFirebaseReady(),
+      },
+      redis: {
+        ...redis,
+        ping: redisPingOk,
       },
     });
   });

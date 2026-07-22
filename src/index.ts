@@ -3,7 +3,7 @@ import { createApp } from './app';
 import { config } from './config';
 import { initSocket } from './socket';
 import { startWorkers } from './workers';
-import { getRedis } from './lib/redis';
+import { connectRedis } from './lib/redis';
 import { connectDatabase } from './lib/prisma';
 import { ensureStorageBuckets } from './lib/storage';
 import { initFirebase } from './lib/notify';
@@ -21,11 +21,11 @@ async function main() {
   await connectDatabase();
   await ensureStorageBuckets();
   initFirebase();
+  await connectRedis(); // logs connected OK / not connected
 
   const app = createApp();
   const server = http.createServer(app);
   initSocket(server);
-  getRedis(); // best-effort
   startWorkers();
 
   server.listen(config.port, () => {
