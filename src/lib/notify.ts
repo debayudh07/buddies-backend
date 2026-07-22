@@ -56,6 +56,9 @@ export function initFirebase(): boolean {
           privateKey: parsed.private_key,
         }),
       });
+      logger.info('fcm', 'initialized from FIREBASE_SERVICE_ACCOUNT_JSON', {
+        projectId: parsed.project_id,
+      });
     } else if (credPath && fs.existsSync(credPath)) {
       const parsed = JSON.parse(fs.readFileSync(credPath, 'utf8')) as {
         project_id?: string;
