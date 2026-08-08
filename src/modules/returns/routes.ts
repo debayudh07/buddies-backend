@@ -69,12 +69,42 @@ returnsRouter.post(
     const window = await prisma.returnWindowMatrix.findUnique({
       where: { productCategory: req.body.productCategory },
     });
-    const hours = window?.windowHours ?? 12;
-    if (order.deliveredAt) {
-      const elapsedH = (Date.now() - order.deliveredAt.getTime()) / 3600000;
-      if (elapsedH > hours) {
-        throw new AppError(400, 'RETURN_WINDOW_EXPIRED', `Window was ${hours}h for this category`);
+    if (!window) {
+      throw new AppError(
+        400,
+        'UNKNOWN_CATEGORY',
+        'Unknown product category — pick one from the return windows list',
+      );
+    }
+    if (window.validReasons.length > 0 && !window.validReasons.includes(req.body.reasonCode)) {
+      // Allow clear supplier-fault auto codes even if not listed for the category.
+      const autoCodes = new Set(['thawed', 'cold_chain_break', 'expired', 'wrong_item', 'pest', 'leakage']);
+      if (!autoCodes.has(req.body.reasonCode)) {
+        throw new AppError(
+          400,
+          'INVALID_REASON',
+          `Reason not valid for ${req.body.productCategory}. Allowed: ${window.validReasons.join(', ')}`,
+        );
       }
+    }
+    const hours = window.windowHours;
+    if (!order.deliveredAt) {
+      throw new AppError(
+        400,
+        'NOT_DELIVERED',
+        'Returns require a recorded delivery time (sign challan first)',
+      );
+    }
+    // Absolute deadline from delivery — never extend from "now" on draft create.
+    const windowDeadline = new Date(
+      order.deliveredAt.getTime() + hours * 3_600_000,
+    );
+    if (Date.now() > windowDeadline.getTime()) {
+      throw new AppError(
+        400,
+        'RETURN_WINDOW_EXPIRED',
+        `Return window was ${hours}h after delivery and is closed`,
+      );
     }
 
     const claim = await prisma.returnClaim.create({
@@ -86,7 +116,7 @@ returnsRouter.post(
         productCategory: req.body.productCategory,
         lineItemIds: req.body.lineItemIds,
         notes: req.body.notes,
-        windowDeadline: new Date(Date.now() + hours * 3600000),
+        windowDeadline,
         status: 'draft',
       },
     });
@@ -109,8 +139,16 @@ returnsRouter.post(
     });
   },
   async (req, res) => {
-    const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
+    const claim = assertFound(
+      await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }),
+    );
     if (claim.consumerUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
+    if (claim.status !== 'draft') {
+      throw new AppError(400, 'INVALID_STATE', 'Evidence can only be added to draft claims');
+    }
+    if (claim.windowDeadline < new Date()) {
+      throw new AppError(400, 'RETURN_WINDOW_EXPIRED', 'Return window is closed — cannot add evidence');
+    }
 
     let storageRef = typeof req.body.storageRef === 'string' ? req.body.storageRef : '';
     let mediaType = typeof req.body.mediaType === 'string' ? req.body.mediaType : '';
@@ -153,12 +191,39 @@ returnsRouter.post('/return-claims/:id/submit', authenticate, requireRole('consu
   const claim = assertFound(
     await prisma.returnClaim.findUnique({
       where: { id: requireParam(req, 'id') },
-      include: { evidence: true },
+      include: {
+        evidence: true,
+        order: { select: { deliveredAt: true } },
+      },
     }),
   );
   if (claim.consumerUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
-  if (claim.windowDeadline < new Date()) {
-    throw new AppError(400, 'RETURN_WINDOW_EXPIRED', 'Window expired');
+  if (claim.status !== 'draft') {
+    throw new AppError(400, 'INVALID_STATE', 'Only draft claims can be submitted');
+  }
+
+  // Re-check absolute delivery window (fixes old drafts that used now+hours).
+  let deadline = claim.windowDeadline;
+  const window = await prisma.returnWindowMatrix.findUnique({
+    where: { productCategory: claim.productCategory },
+  });
+  if (claim.order.deliveredAt && window) {
+    deadline = new Date(
+      claim.order.deliveredAt.getTime() + window.windowHours * 3_600_000,
+    );
+    if (deadline.getTime() !== claim.windowDeadline.getTime()) {
+      await prisma.returnClaim.update({
+        where: { id: claim.id },
+        data: { windowDeadline: deadline },
+      });
+    }
+  }
+  if (deadline < new Date()) {
+    throw new AppError(
+      400,
+      'RETURN_WINDOW_EXPIRED',
+      'Return window is closed — you can no longer submit this claim',
+    );
   }
   if (claim.evidence.length === 0) {
     throw new AppError(400, 'EVIDENCE_REQUIRED', 'Upload photo/video evidence first');
@@ -176,6 +241,7 @@ returnsRouter.post('/return-claims/:id/submit', authenticate, requireRole('consu
       decidedAt: auto ? new Date() : undefined,
       feeAllocation: auto ? 'supplier_bears_reverse' : 'none',
       mediatorNotes: auto ? 'Auto-approved: clear supplier fault signals' : undefined,
+      windowDeadline: deadline,
     },
   });
 
@@ -196,19 +262,41 @@ returnsRouter.get('/me/return-claims', authenticate, async (req, res) => {
     req.user!.role === 'supplier'
       ? { supplierUserId: req.user!.id }
       : { consumerUserId: req.user!.id };
+  const take = Math.min(
+    Math.max(parseInt(String(req.query.limit ?? '40'), 10) || 40, 1),
+    100,
+  );
   const claims = await prisma.returnClaim.findMany({
     where,
-    include: { evidence: true },
+    include: {
+      evidence: true,
+      order: { select: { id: true, orderCode: true, status: true } },
+    },
     orderBy: { createdAt: 'desc' },
+    take,
   });
   res.json({ claims });
 });
 
 returnsRouter.get('/supplier/return-claims', authenticate, requireRole('supplier'), async (req, res) => {
+  // Full supplier history — UI filters "needs action" vs decided.
+  const take = Math.min(
+    Math.max(parseInt(String(req.query.limit ?? '40'), 10) || 40, 1),
+    100,
+  );
   const claims = await prisma.returnClaim.findMany({
-    where: { supplierUserId: req.user!.id, status: { in: ['supplier_review', 'submitted', 'auto_approved'] } },
-    include: { evidence: true },
+    where: {
+      supplierUserId: req.user!.id,
+      status: {
+        in: ['supplier_review', 'submitted', 'auto_approved', 'approved', 'rejected', 'closed'],
+      },
+    },
+    include: {
+      evidence: true,
+      order: { select: { id: true, orderCode: true, status: true } },
+    },
     orderBy: { createdAt: 'desc' },
+    take,
   });
   res.json({ claims });
 });
@@ -258,7 +346,19 @@ returnsRouter.get('/return-claims/:id', authenticate, async (req, res) => {
   const claim = assertFound(
     await prisma.returnClaim.findUnique({
       where: { id: requireParam(req, 'id') },
-      include: { evidence: true },
+      include: {
+        evidence: true,
+        order: {
+          select: {
+            id: true,
+            orderCode: true,
+            status: true,
+            deliveryAddress: true,
+            bid: { select: { amountPaise: true } },
+            bidRequest: { include: { items: true } },
+          },
+        },
+      },
     }),
   );
   if (claim.consumerUserId !== req.user!.id && claim.supplierUserId !== req.user!.id && req.user!.role !== 'admin') {

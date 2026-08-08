@@ -3,8 +3,11 @@ import multer from 'multer';
 import { authenticate } from '../../middleware/auth';
 import { AppError } from '../../lib/errors';
 import {
+  assertCanAccessStorageRef,
   createSignedUrlForRef,
   isStoragePurpose,
+  MAX_SIGNED_URL_TTL_SEC,
+  DEFAULT_SIGNED_URL_TTL_SEC,
   uploadBuffer,
   type StoragePurpose,
 } from '../../lib/storage';
@@ -28,9 +31,9 @@ const upload = multer({
 });
 
 /**
- * POST /v1/uploads?purpose=returns|kyc|chat|payments|challans
+ * POST /v1/uploads?purpose=returns|kyc|chat|payments|challans|profiles
  * multipart field name: file
- * Returns storageRef to persist on evidence / chat / payment / challan fields.
+ * Returns storageRef to persist on evidence / chat / payment / challan / avatar fields.
  */
 uploadsRouter.post('/uploads', authenticate, (req, res, next) => {
   upload.single('file')(req, res, (err) => {
@@ -52,7 +55,7 @@ uploadsRouter.post('/uploads', authenticate, (req, res, next) => {
     throw new AppError(
       400,
       'INVALID_PURPOSE',
-      'purpose must be one of: kyc, returns, chat, payments, challans',
+      'purpose must be one of: kyc, returns, chat, payments, challans, profiles',
     );
   }
   const purpose = purposeRaw as StoragePurpose;
@@ -82,13 +85,19 @@ uploadsRouter.post('/uploads', authenticate, (req, res, next) => {
   });
 });
 
-/** GET /v1/uploads/signed-url?storageRef=bucket/path */
+/** GET /v1/uploads/signed-url?storageRef=bucket/path — ACL-gated */
 uploadsRouter.get('/uploads/signed-url', authenticate, async (req, res) => {
   const storageRef = String(req.query.storageRef ?? '');
   if (!storageRef) {
     throw new AppError(400, 'STORAGE_REF_REQUIRED', 'storageRef query param required');
   }
-  const ttl = Number(req.query.ttlSec ?? 3600);
+  const rawTtl = Number(req.query.ttlSec ?? DEFAULT_SIGNED_URL_TTL_SEC);
+  const ttl = Math.min(
+    Math.max(1, Number.isFinite(rawTtl) ? rawTtl : DEFAULT_SIGNED_URL_TTL_SEC),
+    MAX_SIGNED_URL_TTL_SEC,
+  );
+
+  await assertCanAccessStorageRef(req.user!, storageRef);
   const signedUrl = await createSignedUrlForRef(storageRef, ttl);
   res.json({ storageRef, signedUrl, expiresInSec: ttl });
 });

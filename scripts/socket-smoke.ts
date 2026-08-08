@@ -81,29 +81,45 @@ function waitForEvent<T = unknown>(
 async function main() {
   log(`\n=== Socket.IO smoke @ ${ROOT} ===\n`);
 
+  const rooms = new Set<string>();
   const socket: Socket = io(ROOT, {
-    transports: ['websocket'],
+    // Render free tier: allow polling fallback if pure websocket fails
+    transports: ['polling', 'websocket'],
+    upgrade: true,
     forceNew: true,
-    timeout: 8000,
+    timeout: 30_000,
+    reconnection: true,
+    reconnectionAttempts: 8,
   });
+  const joinRoom = (room: string) => {
+    rooms.add(room);
+    socket.emit('join', room);
+  };
 
+  let firstConnect = true;
   await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('socket connect timeout')), 8000);
+    const t = setTimeout(() => reject(new Error('socket connect timeout')), 30_000);
     socket.on('connect', () => {
-      clearTimeout(t);
-      pass('socket connected', socket.id);
-      resolve();
+      // Re-join rooms after Render idle disconnects / reconnects
+      for (const room of rooms) socket.emit('join', room);
+      if (firstConnect) {
+        firstConnect = false;
+        clearTimeout(t);
+        pass('socket connected', `${socket.id} via ${socket.io.engine.transport.name}`);
+        resolve();
+      } else {
+        log(`  … reconnected ${socket.id} (re-joined ${rooms.size} rooms)`);
+      }
     });
     socket.on('connect_error', (err) => {
-      clearTimeout(t);
-      reject(err);
+      log(`  … connect_error: ${err.message}`);
     });
   });
 
-  socket.emit('join', 'bidzone:all');
+  joinRoom('bidzone:all');
   pass('joined bidzone:all');
 
-  // Bootstrap identities + KYC
+  // Bootstrap identities + KYC (may take a while on Render — keep socket alive via reconnect handlers)
   log('\n1. Bootstrap');
   await api('POST', '/auth/session', C);
   await api('PUT', '/consumer/profile', C, {
@@ -135,9 +151,11 @@ async function main() {
   }
   pass('consumer + verified supplier ready');
 
-  // Demand → expect bidzone event
+  // Demand → expect bidzone event (re-join in case of reconnect during bootstrap)
   log('\n2. Demand + bidzone event');
-  const demandEvt = waitForEvent<any>(socket, 'demand.request_created', 12_000);
+  joinRoom('bidzone:all');
+  await new Promise((r) => setTimeout(r, 500));
+  const demandEvt = waitForEvent<any>(socket, 'demand.request_created', 45_000);
   const br = await api('POST', '/consumer/bid-requests', C, {
     privacyAccepted: true,
     budgetPaise: 300000,
@@ -152,12 +170,13 @@ async function main() {
   }
   pass('demand.request_created', bidRequestId);
 
-  socket.emit('join', `auction:${bidRequestId}`);
+  joinRoom(`auction:${bidRequestId}`);
+  await new Promise((r) => setTimeout(r, 300));
   pass('joined auction room');
 
   // Bid → expect auction.bid_placed
   log('\n3. Bid + auction events');
-  const bidEvt = waitForEvent<any>(socket, 'auction.bid_placed', 12_000);
+  const bidEvt = waitForEvent<any>(socket, 'auction.bid_placed', 45_000);
   const bidRes = await api('POST', '/supplier/bids', S, {
     bidRequestId,
     amountPaise: 280000,
@@ -175,14 +194,14 @@ async function main() {
   }
   pass('auction.bid_placed', bidId);
 
-  const acceptEvt = waitForEvent<any>(socket, 'auction.bid_accepted', 20_000);
+  const acceptEvt = waitForEvent<any>(socket, 'auction.bid_accepted', 45_000);
   await api('POST', `/consumer/bids/${bidId}/accept`, C);
   await acceptEvt;
   pass('auction.bid_accepted');
 
   // Register listener immediately before the ack that creates the order (DB can be slow)
   await api('POST', `/bids/${bidId}/acknowledge`, C, { role: 'consumer' });
-  const orderEvt = waitForEvent<any>(socket, 'order.created', 30_000);
+  const orderEvt = waitForEvent<any>(socket, 'order.created', 60_000);
   const ack = await api('POST', `/bids/${bidId}/acknowledge`, S, { role: 'supplier' });
   const orderPayload = await orderEvt;
   const orderId = ack.order?.id ?? orderPayload?.orderId;
@@ -194,8 +213,9 @@ async function main() {
 
   const threadId = ack.order?.chatThread?.id;
   if (!threadId) fail('chat thread', 'missing after dual ack');
-  socket.emit('join', `tracking:${orderId}`);
-  socket.emit('join', `chat:${threadId}`);
+  joinRoom(`tracking:${orderId}`);
+  joinRoom(`chat:${threadId}`);
+  await new Promise((r) => setTimeout(r, 300));
   pass('joined tracking + chat rooms');
 
   // Status / tracking / chat
@@ -205,19 +225,19 @@ async function main() {
   const statusEvt = waitForEvent<any>(
     socket,
     'order.status_changed',
-    12_000,
+    45_000,
     (p) => p?.status === 'out_for_delivery',
   );
   await api('POST', `/orders/${orderId}/status`, S, { status: 'out_for_delivery' });
   await statusEvt;
   pass('order.status_changed (out_for_delivery)');
 
-  const trackEvt = waitForEvent<any>(socket, 'tracking.location_updated', 12_000);
+  const trackEvt = waitForEvent<any>(socket, 'tracking.location_updated', 45_000);
   await api('POST', `/orders/${orderId}/tracking`, S, { lat: 12.98, lng: 77.58, speed: 20 });
   await trackEvt;
   pass('tracking.location_updated');
 
-  const chatEvt = waitForEvent<any>(socket, 'chat.message_created', 12_000);
+  const chatEvt = waitForEvent<any>(socket, 'chat.message_created', 45_000);
   await api('POST', `/orders/${orderId}/chat/messages`, S, { body: 'Socket smoke: on the way' });
   await chatEvt;
   pass('chat.message_created');

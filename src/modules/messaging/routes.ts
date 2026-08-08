@@ -7,11 +7,22 @@ import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
 import { emitChat } from '../../socket';
 import { sendPush } from '../../lib/notify';
+import { parseLimit } from '../../lib/pagination';
 
 export const messagingRouter = Router();
 
 async function assertOrderMember(orderId: string, userId: string) {
-  const order = assertFound(await prisma.order.findUnique({ where: { id: orderId }, include: { chatThread: true } }));
+  const order = assertFound(
+    await prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        id: true,
+        consumerUserId: true,
+        supplierUserId: true,
+        chatThread: true,
+      },
+    }),
+  );
   if (order.consumerUserId !== userId && order.supplierUserId !== userId) {
     throw new AppError(403, 'FORBIDDEN', 'Not a party to this order');
   }
@@ -19,13 +30,43 @@ async function assertOrderMember(orderId: string, userId: string) {
 }
 
 messagingRouter.get('/orders/:id/chat', authenticate, async (req, res) => {
-  const order = await assertOrderMember(requireParam(req, 'id'), req.user!.id);
-  if (!order.chatThread) throw new AppError(404, 'NO_THREAD', 'Chat opens after dual ack');
-  const messages = await prisma.chatMessage.findMany({
-    where: { threadId: order.chatThread.id },
-    orderBy: { createdAt: 'asc' },
+  const orderId = requireParam(req, 'id');
+  const take = parseLimit(req.query.limit, { defaultLimit: 100, max: 200 });
+
+  // One query: thread by orderId + recent messages (saves a serial Prisma RTT).
+  const thread = await prisma.chatThread.findUnique({
+    where: { orderId },
+    select: {
+      id: true,
+      orderId: true,
+      consumerUserId: true,
+      supplierUserId: true,
+      createdAt: true,
+      messages: {
+        orderBy: { createdAt: 'desc' },
+        take,
+        select: {
+          id: true,
+          threadId: true,
+          senderId: true,
+          body: true,
+          imageRef: true,
+          createdAt: true,
+        },
+      },
+    },
   });
-  res.json({ thread: order.chatThread, messages });
+  if (!thread) throw new AppError(404, 'NO_THREAD', 'Chat opens after dual ack');
+  if (
+    thread.consumerUserId !== req.user!.id &&
+    thread.supplierUserId !== req.user!.id
+  ) {
+    throw new AppError(403, 'FORBIDDEN', 'Not a party to this order');
+  }
+
+  const { messages: recent, ...threadMeta } = thread;
+  const messages = [...recent].reverse();
+  res.json({ thread: threadMeta, messages });
 });
 
 messagingRouter.post(
@@ -49,12 +90,13 @@ messagingRouter.post(
 
     const peer =
       order.consumerUserId === req.user!.id ? order.supplierUserId : order.consumerUserId;
-    await sendPush({
+    // Don't hold the HTTP response for FCM.
+    void sendPush({
       userId: peer,
       title: 'New message',
       body: req.body.body.slice(0, 80),
       data: { orderId: order.id, threadId: order.chatThread.id },
-    });
+    }).catch(() => undefined);
 
     res.status(201).json({ message });
   },

@@ -125,16 +125,40 @@ async function main() {
   await bootstrap();
   pass('bootstrap identities');
 
-  const socket: Socket = io(ROOT, { transports: ['websocket'], forceNew: true });
-  await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('socket connect timeout')), 8000);
-    socket.on('connect', () => {
-      clearTimeout(t);
-      resolve();
-    });
-    socket.on('connect_error', reject);
+  const rooms = new Set<string>();
+  const socket: Socket = io(ROOT, {
+    transports: ['polling', 'websocket'],
+    upgrade: true,
+    forceNew: true,
+    timeout: 30_000,
+    reconnection: true,
+    reconnectionAttempts: 8,
   });
-  pass('socket connected', socket.id);
+  const joinRoom = (room: string) => {
+    rooms.add(room);
+    socket.emit('join', room);
+  };
+  let firstConnect = true;
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('socket connect timeout')), 30_000);
+    socket.on('connect', () => {
+      for (const room of rooms) socket.emit('join', room);
+      if (firstConnect) {
+        firstConnect = false;
+        clearTimeout(t);
+        resolve();
+      } else {
+        log(`  … reconnected ${socket.id} (re-joined ${rooms.size} rooms)`);
+      }
+    });
+    socket.on('connect_error', (err) => {
+      log(`  … connect_error: ${err.message}`);
+    });
+  });
+  pass('socket connected', `${socket.id} via ${socket.io.engine.transport.name}`);
+
+  // Warm API again (Render can 404 briefly after poll storms)
+  await fetch(`${ROOT}/health`);
 
   // ---------- 1. Auto-extend ----------
   log('\n1. Auction auto-extend');
@@ -152,7 +176,8 @@ async function main() {
     where: { id: bidRequestId },
     data: { liveEndsAt: nearEnd, extendCount: 0 },
   });
-  socket.emit('join', `auction:${bidRequestId}`);
+  joinRoom(`auction:${bidRequestId}`);
+  await new Promise((r) => setTimeout(r, 400));
   const bidRes = await api('POST', '/supplier/bids', S, {
     bidRequestId,
     amountPaise: 180000,
@@ -197,8 +222,9 @@ async function main() {
   const threadId = ack.order.chatThread?.id as string | undefined;
   if (!threadId) fail('chat thread', 'missing');
   // thread_created may have been missed if we weren't in room — join and treat HTTP as source of truth
-  socket.emit('join', `chat:${threadId}`);
-  socket.emit('join', `tracking:${orderId}`);
+  joinRoom(`chat:${threadId}`);
+  joinRoom(`tracking:${orderId}`);
+  await new Promise((r) => setTimeout(r, 400));
   pass('order + chat thread', orderId);
   // Drain optional thread event without failing
   void threadEvt.catch(() => undefined);
@@ -289,7 +315,8 @@ async function main() {
     budgetPaise: 150000,
     items: [{ name: 'Garlic', quantity: 2, unit: 'kg', productCategory: 'fresh_produce' }],
   });
-  socket.emit('join', `auction:${br3.bidRequest.id}`);
+  joinRoom(`auction:${br3.bidRequest.id}`);
+  await new Promise((r) => setTimeout(r, 400));
   const bid3 = await api('POST', '/supplier/bids', S, {
     bidRequestId: br3.bidRequest.id,
     amountPaise: 140000,

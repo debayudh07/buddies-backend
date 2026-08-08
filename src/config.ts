@@ -1,7 +1,34 @@
 import 'dotenv/config';
 
+const env = process.env.NODE_ENV ?? 'development';
+const isProd = env === 'production';
+const devAuthBypass = process.env.DEV_AUTH_BYPASS === 'true';
+
+if (isProd && devAuthBypass) {
+  throw new Error('FATAL: DEV_AUTH_BYPASS must be false when NODE_ENV=production');
+}
+
+if (isProd) {
+  for (const key of [
+    'DATABASE_URL',
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'SUPABASE_JWT_SECRET',
+  ] as const) {
+    if (!process.env[key]) {
+      throw new Error(`FATAL: ${key} is required when NODE_ENV=production`);
+    }
+  }
+}
+
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 export const config = {
-  env: process.env.NODE_ENV ?? 'development',
+  env,
+  isProd,
   port: Number(process.env.PORT ?? 8000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   redisUrl: process.env.REDIS_URL ?? '',
@@ -9,7 +36,10 @@ export const config = {
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? '',
   supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
   supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET ?? '',
-  devAuthBypass: process.env.DEV_AUTH_BYPASS === 'true',
+  /** Staging only. Forced off in production. */
+  devAuthBypass: isProd ? false : devAuthBypass,
+  /** Empty = reflect request origin in dev; in prod must be set. */
+  allowedOrigins,
   auction: {
     baseWindowSec: Number(process.env.AUCTION_BASE_WINDOW_SEC ?? 600),
     autoExtendTriggerSec: Number(process.env.AUCTION_AUTO_EXTEND_TRIGGER_SEC ?? 60),

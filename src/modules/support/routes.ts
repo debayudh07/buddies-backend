@@ -6,6 +6,7 @@ import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
 import { sendPush } from '../../lib/notify';
+import { responseCacheGet, responseCacheSet } from '../../lib/response-cache';
 
 export const supportRouter = Router();
 
@@ -25,6 +26,18 @@ supportRouter.get('/support/categories', authenticate, async (_req, res) => {
 supportRouter.get('/support/articles', authenticate, async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined;
   const audiences = audienceForRole(req.user!.role);
+  const cacheKey = q
+    ? null
+    : `support:articles:${req.user!.role}`;
+  if (cacheKey) {
+    const cached = responseCacheGet<{ articles: unknown[] }>(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'HIT');
+      res.json(cached);
+      return;
+    }
+  }
+
   const articles = await prisma.supportArticle.findMany({
     where: {
       published: true,
@@ -38,9 +51,40 @@ supportRouter.get('/support/articles', authenticate, async (req, res) => {
           }
         : {}),
     },
+    // List DTO — full body only on detail / search.
+    select: {
+      id: true,
+      slug: true,
+      title: true,
+      audience: true,
+      sortOrder: true,
+      updatedAt: true,
+      createdAt: true,
+      ...(q ? { bodyMd: true as const } : {}),
+    },
     orderBy: [{ sortOrder: 'asc' }, { updatedAt: 'desc' }],
+    take: 50,
   });
-  res.json({ articles });
+
+  const payload = {
+    articles: articles.map((a) => {
+      if (!q) return a;
+      const row = a as typeof a & { bodyMd?: string };
+      const { bodyMd, ...rest } = row;
+      return {
+        ...rest,
+        summary: bodyMd
+          ? bodyMd.replace(/\s+/g, ' ').trim().slice(0, 160)
+          : undefined,
+      };
+    }),
+  };
+
+  if (cacheKey) {
+    responseCacheSet(cacheKey, payload, 30_000);
+  }
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 supportRouter.get('/support/articles/:slug', authenticate, async (req, res) => {

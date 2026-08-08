@@ -138,7 +138,7 @@ async function main() {
     displayName: 'Smoke Consumer',
   });
   await api('consumer privacy', 'POST', '/me/privacy-accept', C);
-  await api('consumer address', 'POST', '/consumer/addresses', C, {
+  const addrRes = await api('consumer address', 'POST', '/consumer/addresses', C, {
     label: 'Kitchen',
     line: '12 MG Road',
     city: 'Bengaluru',
@@ -146,6 +146,8 @@ async function main() {
     lng: 77.59,
     isDefault: true,
   });
+  const addressId = addrRes.address?.id as string | undefined;
+  if (!addressId) throw new Error('No address.id');
 
   const sSession = await api('supplier session', 'POST', '/auth/session', S);
   const supplierUserId = sSession.user?.id ?? '22222222-2222-4222-8222-222222222222';
@@ -200,8 +202,7 @@ async function main() {
     budgetPaise: 500000,
     durationHours: 24,
     deliveryWindow: 'tomorrow 6-8am',
-    lat: 12.97,
-    lng: 77.59,
+    addressId,
     items: [
       {
         name: 'Tomatoes',
@@ -214,6 +215,17 @@ async function main() {
   });
   const bidRequestId = br.bidRequest?.id ?? br.id;
   if (!bidRequestId) throw new Error('No bidRequest.id');
+  const brLat = br.bidRequest?.lat ?? br.lat;
+  const brLng = br.bidRequest?.lng ?? br.lng;
+  const brAddr = br.bidRequest?.deliveryAddress ?? br.deliveryAddress;
+  if (brLat !== 12.97 || brLng !== 77.59) {
+    throw new Error(`BidRequest pin missing: lat=${brLat} lng=${brLng}`);
+  }
+  if (!brAddr || !String(brAddr).includes('12 MG Road')) {
+    throw new Error(`BidRequest deliveryAddress missing: ${brAddr}`);
+  }
+  results.push({ ok: true, step: 'bid-request has delivery pin + address' });
+  log('  ✓ bid-request has delivery pin + address');
 
   // 5. Bidzone + bid
   log('\n5. Supplier Bidzone + bid');
@@ -240,6 +252,25 @@ async function main() {
   const orderId = ack2.order?.id ?? ack2.id;
   if (!orderId) throw new Error('No order.id after dual ack');
   log(`  → order ${orderId} (${ack2.order?.orderCode ?? ''})`);
+
+  const orderDetail = await api('get order', 'GET', `/orders/${orderId}`, S);
+  const order = orderDetail.order ?? orderDetail;
+  if (order.hasDeliveryPin !== true) {
+    throw new Error(`Order missing hasDeliveryPin (got ${order.hasDeliveryPin})`);
+  }
+  if (order.deliveryLat !== 12.97 || order.deliveryLng !== 77.59) {
+    throw new Error(
+      `Order pin mismatch: lat=${order.deliveryLat} lng=${order.deliveryLng}`,
+    );
+  }
+  if (!order.deliveryAddress || !String(order.deliveryAddress).includes('12 MG Road')) {
+    throw new Error(`Order deliveryAddress missing: ${order.deliveryAddress}`);
+  }
+  if (order.deliveryWindow !== 'tomorrow 6-8am') {
+    throw new Error(`Order deliveryWindow missing: ${order.deliveryWindow}`);
+  }
+  results.push({ ok: true, step: 'order exposes delivery pin + window to supplier' });
+  log('  ✓ order exposes delivery pin + window to supplier');
 
   // Chat (+ image upload)
   log('\n8. Chat');

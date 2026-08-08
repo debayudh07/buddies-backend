@@ -5,12 +5,14 @@ import { getMessaging, type BatchResponse, type MulticastMessage } from 'firebas
 import { config } from '../config';
 import { prisma } from './prisma';
 import { logger } from './logger';
+import { emitUser } from '../socket';
 
 type NotifyPayload = {
   userId: string;
   title: string;
   body: string;
   data?: Record<string, string>;
+  type?: string;
 };
 
 let app: App | null = null;
@@ -100,8 +102,57 @@ export function isFirebaseReady(): boolean {
   return app !== null || (initAttempted && getApps().length > 0);
 }
 
-/** Send push via Firebase Cloud Messaging (device tokens from DeviceToken table). */
+async function persistInbox(payload: NotifyPayload) {
+  const type =
+    payload.type ??
+    payload.data?.type ??
+    (payload.data?.orderId ? 'order' : payload.data?.bidRequestId ? 'bid' : 'general');
+
+  try {
+    // Prefer optional access — stale Prisma clients (pre-generate) lack these delegates.
+    const prefsDelegate = (prisma as { userPreference?: typeof prisma.userPreference }).userPreference;
+    if (prefsDelegate) {
+      const prefs = await prefsDelegate.findUnique({ where: { userId: payload.userId } });
+      if (prefs) {
+        if (!prefs.pushEnabled && !prefs.bidAlerts && !prefs.orderAlerts) return null;
+        if (type === 'bid' && !prefs.bidAlerts) return null;
+        if (type === 'order' && !prefs.orderAlerts) return null;
+      }
+    }
+
+    const notificationDelegate = (prisma as { notification?: typeof prisma.notification }).notification;
+    if (!notificationDelegate) {
+      logger.warn('notify', 'prisma.notification missing — run prisma generate', {
+        userId: payload.userId,
+      });
+      return null;
+    }
+
+    const notification = await notificationDelegate.create({
+      data: {
+        userId: payload.userId,
+        title: payload.title,
+        body: payload.body,
+        type,
+        data: payload.data ?? undefined,
+      },
+    });
+
+    emitUser(payload.userId, 'notify.created', { notification });
+    return notification;
+  } catch (e) {
+    logger.error('notify', 'persistInbox failed', {
+      userId: payload.userId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return null;
+  }
+}
+
+/** Persist in-app notification, then send FCM when enabled. */
 export async function sendPush(payload: NotifyPayload): Promise<void> {
+  await persistInbox(payload);
+
   if (!config.fcmEnabled) {
     logger.debug('fcm', 'stub (disabled)', {
       userId: payload.userId,
@@ -117,7 +168,8 @@ export async function sendPush(payload: NotifyPayload): Promise<void> {
   });
 
   if (tokens.length === 0) {
-    logger.info('fcm', 'no device tokens', { userId: payload.userId, title: payload.title });
+    // Normal on simulators / installs that never registered FCM — don't spam info logs.
+    logger.debug('fcm', 'no device tokens', { userId: payload.userId, title: payload.title });
     return;
   }
 

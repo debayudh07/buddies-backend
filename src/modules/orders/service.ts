@@ -18,8 +18,9 @@ export async function createOrderFromAcceptedBid(bidId: string) {
     }),
   );
 
-  if (!bid.consumerAckAt || !bid.supplierAckAt) {
-    throw new AppError(400, 'ACK_REQUIRED', 'Both parties must acknowledge');
+  // Consumer accept is binding and creates the order; supplier ack is tracked separately.
+  if (!bid.consumerAckAt) {
+    throw new AppError(400, 'ACK_REQUIRED', 'Consumer must accept the bid first');
   }
 
   const existing = await prisma.order.findUnique({ where: { bidId } });
@@ -39,12 +40,18 @@ export async function createOrderFromAcceptedBid(bidId: string) {
         status: 'bid_accepted',
         slaDeadlineAt,
         slaStatus: 'on_track',
-        deliveryLat: consumer.lat ?? bid.bidRequest.lat ?? undefined,
-        deliveryLng: consumer.lng ?? bid.bidRequest.lng ?? undefined,
-        deliveryAddress: consumer.addressLine ?? 'Delivery address revealed post-ack',
+        deliveryLat: bid.bidRequest.lat ?? consumer.lat ?? undefined,
+        deliveryLng: bid.bidRequest.lng ?? consumer.lng ?? undefined,
+        deliveryAddress:
+          bid.bidRequest.deliveryAddress ?? consumer.addressLine ?? null,
         consumerAckAt: bid.consumerAckAt,
         supplierAckAt: bid.supplierAckAt,
-        statusEvents: { create: { status: 'bid_accepted', note: 'Dual ack complete' } },
+        statusEvents: {
+          create: {
+            status: 'bid_accepted',
+            note: bid.supplierAckAt ? 'Order confirmed by both parties' : 'Won bid — order opened',
+          },
+        },
         offlinePayment: { create: { status: 'not_started' } },
         chatThread: {
           create: {
@@ -55,13 +62,18 @@ export async function createOrderFromAcceptedBid(bidId: string) {
         digitalChallan: {
           create: {
             isDraft: true,
-            lineSnapshotJson: bid.bidRequest.items.map((i) => ({
+            lineSnapshotJson: bid.bidRequest.items.map((i, idx, arr) => ({
               name: i.name,
               quantity: i.quantity,
               unit: i.unit,
               productCategory: i.productCategory,
               grade: bid.grade,
               rslDaysAtDelivery: bid.rslDaysAtDelivery,
+              // Full winning bid amount on first line; UI also uses order.totalPaise.
+              amountPaise: idx === 0 ? bid.amountPaise : 0,
+              lineTotalPaise: idx === 0 ? bid.amountPaise : 0,
+              isWinningBidTotal: idx === 0,
+              itemCount: arr.length,
             })),
           },
         },

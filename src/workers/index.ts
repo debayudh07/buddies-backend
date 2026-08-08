@@ -48,7 +48,9 @@ export async function tickSlaBreach(): Promise<WorkerTickResult> {
   return { processed: late.length };
 }
 
-/** Notify parties when GPS stream is stale on an active session. */
+/** Notify parties when GPS stream is stale on an active session (at most once per session episode). */
+const staleTrackingNotified = new Set<string>();
+
 export async function tickTrackingStale(): Promise<WorkerTickResult> {
   const cutoff = new Date(Date.now() - config.trackingStaleSec * 1000);
   const stale = await prisma.trackingSession.findMany({
@@ -59,22 +61,33 @@ export async function tickTrackingStale(): Promise<WorkerTickResult> {
     include: { order: true },
     take: 50,
   });
+
+  // Drop notify-state for sessions that are active again or no longer listed.
+  const stillStale = new Set(stale.map((s) => s.orderId));
+  for (const id of [...staleTrackingNotified]) {
+    if (!stillStale.has(id)) staleTrackingNotified.delete(id);
+  }
+
+  let notified = 0;
   for (const s of stale) {
-    await sendPush({
+    if (staleTrackingNotified.has(s.orderId)) continue;
+    staleTrackingNotified.add(s.orderId);
+    notified += 1;
+    void sendPush({
       userId: s.order.consumerUserId,
       title: 'Tracking delayed',
       body: 'Rider location has not updated recently',
       data: { orderId: s.orderId },
-    });
-    await sendPush({
+    }).catch(() => undefined);
+    void sendPush({
       userId: s.order.supplierUserId,
       title: 'Enable GPS',
       body: 'Your tracking stream looks stale',
       data: { orderId: s.orderId },
-    });
+    }).catch(() => undefined);
   }
-  if (stale.length) logger.info('worker', 'stale tracking sessions', { count: stale.length });
-  return { processed: stale.length };
+  if (notified) logger.info('worker', 'stale tracking sessions', { count: notified });
+  return { processed: notified };
 }
 
 /** In-process schedulers (BullMQ optional later when Redis queues are wired). */

@@ -1,0 +1,10 @@
+project_id = "buddies"
+
+[api]
+enabled = true
+
+[db]
+# Prisma owns table schema — do not invent tables here without generating via Prisma.
+
+[realtime]
+enabled = true

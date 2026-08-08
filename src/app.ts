@@ -16,26 +16,60 @@ import { messagingRouter } from './modules/messaging/routes';
 import { returnsRouter } from './modules/returns/routes';
 import { supportRouter } from './modules/support/routes';
 import { uploadsRouter } from './modules/uploads/routes';
+import { notificationsRouter } from './modules/notifications/routes';
+import { dashboardRouter } from './modules/dashboard/routes';
 import { isFirebaseReady, initFirebase } from './lib/notify';
 import { getRedisStatus, redisPing } from './lib/redis';
 import { config } from './config';
 
+function corsOrigin(): cors.CorsOptions['origin'] {
+  if (config.allowedOrigins.length > 0) {
+    return config.allowedOrigins;
+  }
+  if (config.isProd) {
+    // Fail closed if misconfigured — set ALLOWED_ORIGINS in production.
+    return false;
+  }
+  return true;
+}
+
 export function createApp() {
   const app = express();
   app.use(helmet());
-  app.use(cors());
+  app.use(
+    cors({
+      origin: corsOrigin(),
+      credentials: true,
+    }),
+  );
   app.use(express.json({ limit: '2mb' }));
 
-  // Compact HTTP access log (morgan) + structured request log
+  // Compact HTTP access log (morgan) + structured request log.
+  // Latency budgets: reads/views ~200ms, writes ~1000ms (warn when exceeded).
+  // authMs vs handlerMs: warm auth should be ~0–5ms; large handlerMs = Prisma RTT.
   app.use(morgan('dev'));
   app.use((req, res, next) => {
     const started = Date.now();
     res.on('finish', () => {
-      logger.info('api', `${req.method} ${req.originalUrl}`, {
+      const ms = Date.now() - started;
+      const authMs = typeof req.authMs === 'number' ? req.authMs : undefined;
+      const handlerMs =
+        authMs != null ? Math.max(0, ms - authMs) : undefined;
+      const isRead = ['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+      const budgetMs = isRead ? 200 : 1000;
+      const payload = {
         status: res.statusCode,
-        ms: Date.now() - started,
+        ms,
+        authMs,
+        handlerMs,
+        budgetMs,
         auth: req.headers.authorization ? 'present' : 'none',
-      });
+      };
+      if (ms > budgetMs) {
+        logger.warn('api.slow', `${req.method} ${req.originalUrl}`, payload);
+      } else {
+        logger.info('api', `${req.method} ${req.originalUrl}`, payload);
+      }
     });
     next();
   });
@@ -69,6 +103,8 @@ export function createApp() {
   app.use('/v1', messagingRouter);
   app.use('/v1', returnsRouter);
   app.use('/v1', supportRouter);
+  app.use('/v1', notificationsRouter);
+  app.use('/v1', dashboardRouter);
 
   app.get('/openapi.yaml', (_req, res) => {
     res.sendFile(path.join(process.cwd(), 'openapi', 'openapi.yaml'));

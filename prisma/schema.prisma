@@ -110,6 +110,8 @@ model User {
   email         String?
   role          UserRole
   displayName   String?
+  /// Supabase Storage ref: "buddies-profiles/{userId}/profiles/{uuid}.jpg"
+  avatarStorageRef String?
   privacyAcceptedAt DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -121,6 +123,8 @@ model User {
   supportTickets  SupportTicket[]
   chatMessages    ChatMessage[]
   supportMessages SupportMessage[]
+  notifications   Notification[]
+  preference      UserPreference?
 }
 
 model ConsumerProfile {
@@ -203,6 +207,7 @@ model BidRequest {
   budgetPaise     Int?
   durationHours   Int              @default(24)
   deliveryWindow  String?
+  deliveryAddress String?
   privacyAccepted Boolean          @default(false)
   liveEndsAt      DateTime
   extendCount     Int              @default(0)
@@ -219,6 +224,9 @@ model BidRequest {
   bids     Bid[]
   order    Order?
   standing StandingRfq?
+
+  @@index([status, liveEndsAt])
+  @@index([consumerId, createdAt])
 }
 
 model BidRequestItem {
@@ -291,6 +299,10 @@ model Order {
   trackingPoints  TrackingPoint[]
   returnClaims    ReturnClaim[]
   statusEvents    OrderStatusEvent[]
+
+  @@index([consumerUserId, createdAt])
+  @@index([supplierUserId, createdAt])
+  @@index([status])
 }
 
 model OrderStatusEvent {
@@ -415,6 +427,10 @@ model ReturnClaim {
 
   order    Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
   evidence ReturnEvidence[]
+
+  @@index([consumerUserId, createdAt])
+  @@index([supplierUserId, createdAt, status])
+  @@index([orderId])
 }
 
 model ReturnEvidence {
@@ -520,6 +536,34 @@ model DeviceToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, token])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  title     String
+  body      String
+  type      String    @default("general")
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+
+model UserPreference {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  pushEnabled Boolean  @default(true)
+  bidAlerts   Boolean  @default(true)
+  orderAlerts Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model AuctionConfig {
