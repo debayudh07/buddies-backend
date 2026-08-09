@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { PRODUCT_CATEGORIES } from '../src/lib/product-categories';
 
 const prisma = new PrismaClient();
 
@@ -9,31 +10,66 @@ async function main() {
     update: {},
   });
 
-  const shelf = [
-    { productCategory: 'ultra_perishables_dairy', totalShelfLifeDays: 5, minRslDays: 2, notes: 'Milk, curd, paneer, bread' },
-    { productCategory: 'fresh_proteins', totalShelfLifeDays: 3, minRslDays: 1, notes: 'Chicken, fish — deliver within 12h of harvest preferred' },
-    { productCategory: 'fresh_produce', totalShelfLifeDays: 5, minRslDays: 2, notes: 'Leafy greens, tomatoes' },
-    { productCategory: 'chilled_frozen_fmcg', totalShelfLifeDays: 180, minRslDays: 60, notes: 'Cheese, butter, frozen fries' },
-    { productCategory: 'ambient_liquids', totalShelfLifeDays: 365, minRslDays: 60, notes: 'Oils, syrups' },
-    { productCategory: 'dry_staples', totalShelfLifeDays: 540, minRslDays: 180, notes: 'Flour, rice, sugar, spices' },
-  ];
-  for (const row of shelf) {
+  // Shelf-life matrix — "The buddies.docx" categorical cart
+  for (const row of PRODUCT_CATEGORIES) {
     await prisma.shelfLifeMatrix.upsert({
       where: { productCategory: row.productCategory },
-      create: row,
-      update: row,
+      create: {
+        productCategory: row.productCategory,
+        subCategory: row.exampleItems,
+        totalShelfLifeDays: row.totalShelfLifeDays,
+        minRslDays: row.minRslDays,
+        notes: row.notes,
+      },
+      update: {
+        subCategory: row.exampleItems,
+        totalShelfLifeDays: row.totalShelfLifeDays,
+        minRslDays: row.minRslDays,
+        notes: row.notes,
+      },
     });
   }
 
-  const windows = [
-    { productCategory: 'ultra_perishables_dairy', windowHours: 1, validReasons: ['cold_chain_break', 'leakage', 'low_rsl'], exampleItems: 'Milk, curd, paneer, bread' },
-    { productCategory: 'fresh_proteins', windowHours: 1, validReasons: ['discoloration', 'off_odor', 'temp_abuse'], exampleItems: 'Chicken, fish' },
-    { productCategory: 'fresh_produce', windowHours: 2, validReasons: ['rotting', 'bruising', 'wrong_weight'], exampleItems: 'Greens, tomatoes' },
-    { productCategory: 'chilled_frozen_fmcg', windowHours: 4, validReasons: ['thawed', 'bloating', 'broken_seal'], exampleItems: 'Cheese, frozen fries' },
-    { productCategory: 'ambient_liquids', windowHours: 24, validReasons: ['cap_damage', 'crystallization', 'low_rsl'], exampleItems: 'Oils, syrups' },
-    { productCategory: 'dry_staples', windowHours: 48, validReasons: ['moisture', 'torn_pack', 'pest'], exampleItems: 'Rice, flour, spices' },
+  // Return windows — same cart slugs (doc TIME WINDOW FOR RETURN, split where shelf differs)
+  for (const row of PRODUCT_CATEGORIES) {
+    await prisma.returnWindowMatrix.upsert({
+      where: { productCategory: row.productCategory },
+      create: {
+        productCategory: row.productCategory,
+        windowHours: row.windowHours,
+        validReasons: row.validReasons,
+        exampleItems: row.exampleItems,
+      },
+      update: {
+        windowHours: row.windowHours,
+        validReasons: row.validReasons,
+        exampleItems: row.exampleItems,
+      },
+    });
+  }
+
+  // Keep legacy slugs mapped for any old claims / items (same policy as closest modern group)
+  const legacyWindows = [
+    {
+      productCategory: 'ultra_perishables_dairy',
+      windowHours: 1,
+      validReasons: ['cold_chain_break', 'leakage', 'low_rsl', 'expired'],
+      exampleItems: 'Legacy alias → ultra_fresh_dairy / bakery',
+    },
+    {
+      productCategory: 'chilled_frozen_fmcg',
+      windowHours: 4,
+      validReasons: ['thawed', 'bloating', 'broken_seal', 'expired'],
+      exampleItems: 'Legacy alias → frozen_food / chilled_cheese / chilled_fats',
+    },
+    {
+      productCategory: 'ambient_liquids',
+      windowHours: 24,
+      validReasons: ['cap_damage', 'crystallization', 'low_rsl', 'leakage'],
+      exampleItems: 'Legacy alias → syrups_crushes / cooking_oils',
+    },
   ];
-  for (const row of windows) {
+  for (const row of legacyWindows) {
     await prisma.returnWindowMatrix.upsert({
       where: { productCategory: row.productCategory },
       create: row,
@@ -65,42 +101,56 @@ async function main() {
     {
       slug: 'digital-challan',
       title: 'Digital challan at doorstep',
-      bodyMd: 'Inspect for 10 minutes, then **Sign** in-app or reject on spot. Signing locks visible-damage returns.',
+      bodyMd:
+        'Inspect for 10 minutes, then **Sign** in-app or reject on spot. Signing locks visible-damage returns. Check quantity, grade, and **Minimum RSL** from the category matrix.',
       audience: 'both' as const,
       categoryId: ordersCat?.id,
     },
     {
       slug: 'offline-payment',
       title: 'Pay after delivery (offline)',
-      bodyMd: 'After challan is signed, consumer starts offline payment (UPI/bank). Supplier confirms. Buddies does not hold goods funds.',
+      bodyMd:
+        'After challan is signed, consumer starts offline payment (UPI/bank). Supplier confirms. Buddies does not hold goods funds.',
       audience: 'both' as const,
       categoryId: ordersCat?.id,
     },
     {
       slug: 'bidzone-rules',
       title: 'Bidzone rules for suppliers',
-      bodyMd: 'Verified KYC only. Max 5 concurrent bids (premium for more). Grade + RSL required. Min decrement + auto-extend apply.',
+      bodyMd:
+        'Verified KYC only. Max 5 concurrent bids (premium for more). Grade + shelf life + RSL required. RSL must meet the **category matrix minimum** for the RFQ cart categories.',
       audience: 'supplier' as const,
       categoryId: biddingCat?.id,
     },
     {
       slug: 'multi-attribute-bids',
       title: 'How bids are ranked',
-      bodyMd: 'Bids show a score from price, RSL fit, distance, on-time rate, and rating — not lowest price alone.',
+      bodyMd:
+        'Bids show a score from price, RSL fit vs category minimum, distance, on-time rate, and rating — not lowest price alone.',
       audience: 'consumer' as const,
       categoryId: biddingCat?.id,
     },
     {
       slug: 'return-windows',
       title: 'Return windows by category',
-      bodyMd: 'Ultra-perishables 1h, proteins 1h, produce 2h, chilled/frozen 4h, ambient liquids 24h, dry staples 48h. Media required. No change-of-mind.',
+      bodyMd:
+        'Ultra-fresh dairy/bakery & proteins **1h**, produce **2h**, chilled/frozen **4h**, ambient liquids/oils/coffee/syrups/beverages **24h**, dry staples **48h**. Media required. No change-of-mind.',
+      audience: 'both' as const,
+      categoryId: returnsCat?.id,
+    },
+    {
+      slug: 'shelf-life-matrix',
+      title: 'Shelf life & minimum RSL matrix',
+      bodyMd:
+        'Each cart category has a typical total shelf life and **Minimum RSL at delivery** (e.g. milk/curd 2d, bread 3d, proteins 1d + 12h harvest, cheese 60d, frozen 120d, dry staples 180d). Suppliers must meet or beat Min RSL for the item category.',
       audience: 'both' as const,
       categoryId: returnsCat?.id,
     },
     {
       slug: 'supplier-kyc',
       title: 'Supplier KYC checklist',
-      bodyMd: 'Business name, owner, phone, GST (optional), Aadhaar upload, shop address. Bidzone unlocks after verification.',
+      bodyMd:
+        'Business name, owner, phone, GST (optional), Aadhaar upload, shop address. Bidzone unlocks after verification.',
       audience: 'supplier' as const,
       categoryId: kycCat?.id,
     },
@@ -114,7 +164,9 @@ async function main() {
     });
   }
 
-  console.log('Seed complete: auction config, shelf/return matrices, support articles');
+  console.log(
+    `Seed complete: ${PRODUCT_CATEGORIES.length} shelf/return categories from product doc + support articles`,
+  );
 }
 
 main()

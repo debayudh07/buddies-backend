@@ -40,8 +40,48 @@ returnsRouter.get('/returns/windows', authenticate, async (_req, res) => {
 });
 
 returnsRouter.get('/catalog/shelf-life-matrix', authenticate, async (_req, res) => {
+  const { PRODUCT_CATEGORIES, getCategoryDef } = await import('../../lib/product-categories');
   const matrix = await prisma.shelfLifeMatrix.findMany({ orderBy: { productCategory: 'asc' } });
-  res.json({ matrix });
+  // Prefer DB rows (seeded); if empty, fall back to product-doc constants.
+  if (matrix.length === 0) {
+    res.json({
+      matrix: PRODUCT_CATEGORIES.map((c) => ({
+        productCategory: c.productCategory,
+        subCategory: c.exampleItems,
+        totalShelfLifeDays: c.totalShelfLifeDays,
+        minRslDays: c.minRslDays,
+        notes: c.notes,
+        windowHours: c.windowHours,
+        label: c.label,
+      })),
+    });
+    return;
+  }
+  res.json({
+    matrix: matrix.map((m) => {
+      const def = getCategoryDef(m.productCategory);
+      return {
+        ...m,
+        label: def?.label ?? m.productCategory,
+        windowHours: def?.windowHours ?? null,
+      };
+    }),
+  });
+});
+
+returnsRouter.get('/catalog/product-categories', authenticate, async (_req, res) => {
+  const { PRODUCT_CATEGORIES } = await import('../../lib/product-categories');
+  res.json({
+    categories: PRODUCT_CATEGORIES.map((c) => ({
+      productCategory: c.productCategory,
+      label: c.label,
+      exampleItems: c.exampleItems,
+      totalShelfLifeDays: c.totalShelfLifeDays,
+      minRslDays: c.minRslDays,
+      windowHours: c.windowHours,
+      notes: c.notes,
+    })),
+  });
 });
 
 const claimSchema = z.object({

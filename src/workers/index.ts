@@ -6,9 +6,11 @@ import { expireSubscriptions } from '../modules/subscriptions/service';
 
 export type WorkerTickResult = { processed: number };
 
-/** Expire open auctions past liveEndsAt. */
+/** Expire open auctions past liveEndsAt, and active bids past their expiresAt (bid TTL). */
 export async function tickAuctionExpiry(): Promise<WorkerTickResult> {
   const now = new Date();
+  let processed = 0;
+
   const expired = await prisma.bidRequest.updateMany({
     where: { status: 'open', liveEndsAt: { lt: now } },
     data: { status: 'expired' },
@@ -19,8 +21,23 @@ export async function tickAuctionExpiry(): Promise<WorkerTickResult> {
       data: { status: 'expired' },
     });
     logger.info('worker', 'expired auctions', { count: expired.count });
+    processed += expired.count;
   }
-  return { processed: expired.count };
+
+  // Per-bid TTL (default 5 minutes) — free quota and hide stale offers
+  const staleBids = await prisma.bid.updateMany({
+    where: {
+      status: 'active',
+      expiresAt: { lt: now },
+    },
+    data: { status: 'expired' },
+  });
+  if (staleBids.count > 0) {
+    logger.info('worker', 'expired bids by TTL', { count: staleBids.count });
+    processed += staleBids.count;
+  }
+
+  return { processed };
 }
 
 /** Deactivate subscriptions past endsAt so premium bid caps do not stick. */

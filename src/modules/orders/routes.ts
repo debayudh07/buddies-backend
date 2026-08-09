@@ -7,7 +7,7 @@ import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
 import { config } from '../../config';
-import { emitTracking } from '../../socket';
+import { emitTracking, emitUser } from '../../socket';
 import { sendPush } from '../../lib/notify';
 import { updateSupplierPerformanceOnDelivery } from './service';
 import { etaMinutes, haversineKm } from '../../lib/haversine';
@@ -41,6 +41,69 @@ type OrderStatus =
   | 'challan_signed'
   | 'closed'
   | 'cancelled';
+
+/** Linear rank for fulfillment — higher = later. Missing ranks are null. */
+const STATUS_RANK: Partial<Record<OrderStatus, number>> = {
+  bid_accepted: 0,
+  preparing: 1,
+  out_for_delivery: 2,
+  arrived: 3,
+  inspection_pending: 3,
+  delivered: 4,
+  challan_signed: 4,
+  closed: 5,
+};
+
+/**
+ * Broadcast order change to:
+ * - tracking:{orderId} (order detail screens join this)
+ * - user:{consumer|supplier} (list/home can refresh like chat inbox)
+ */
+function notifyOrderUpdated(
+  order: { id: string; status: string; consumerUserId: string; supplierUserId: string },
+  opts: {
+    paymentStatus?: string | null;
+    reason?: string;
+    push?: { userId: string; title: string; body: string };
+  } = {},
+) {
+  const payload = {
+    orderId: order.id,
+    status: order.status,
+    paymentStatus: opts.paymentStatus ?? null,
+    reason: opts.reason ?? null,
+    at: Date.now(),
+  };
+  emitTracking(order.id, 'order.status_changed', payload);
+  emitTracking(order.id, 'order.updated', payload);
+  emitUser(order.consumerUserId, 'order.updated', payload);
+  emitUser(order.supplierUserId, 'order.updated', payload);
+  invalidateOrderCaches(order.id);
+  if (opts.push) {
+    void sendPush({
+      userId: opts.push.userId,
+      title: opts.push.title,
+      body: opts.push.body,
+      data: { orderId: order.id, status: order.status },
+    }).catch(() => undefined);
+  }
+}
+
+/** True when the requested status step was already applied (safe double-tap). */
+function statusAlreadyApplied(current: OrderStatus, next: OrderStatus): boolean {
+  if (current === next) return true;
+  // arrived auto-becomes inspection_pending
+  if (
+    next === 'arrived' &&
+    ['arrived', 'inspection_pending', 'delivered', 'challan_signed', 'closed'].includes(current)
+  ) {
+    return true;
+  }
+  const cr = STATUS_RANK[current];
+  const nr = STATUS_RANK[next];
+  if (cr == null || nr == null) return false;
+  return cr >= nr && nr > 0;
+}
 
 /** ACL-only order row — mutations / tracking / payment (no heavy joins). */
 async function assertOrderAccess(orderId: string, userId: string, role: string) {
@@ -244,6 +307,12 @@ ordersRouter.post(
     const next = req.body.status as OrderStatus;
     const currentStatus = order.status as OrderStatus;
 
+    if (statusAlreadyApplied(currentStatus, next)) {
+      const fresh = await getOrderForUser(order.id, req.user!.id, 'supplier');
+      res.json({ order: presentOrder(fresh), alreadyApplied: true });
+      return;
+    }
+
     const allowed: Partial<Record<OrderStatus, OrderStatus[]>> = {
       bid_accepted: ['preparing'],
       preparing: ['out_for_delivery'],
@@ -251,7 +320,9 @@ ordersRouter.post(
       arrived: [],
     };
     const ok = allowed[currentStatus]?.includes(next);
-    if (!ok) throw new AppError(400, 'INVALID_TRANSITION', `Cannot go from ${currentStatus} to ${next}`);
+    if (!ok) {
+      throw new AppError(400, 'INVALID_TRANSITION', `Cannot go from ${currentStatus} to ${next}`);
+    }
 
     const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const o = await tx.order.update({
@@ -294,25 +365,30 @@ ordersRouter.post(
       return o;
     });
 
-    const fresh = await prisma.order.findUnique({
-      where: { id: order.id },
-      include: { trackingSession: true, statusEvents: true, bid: true },
-    });
-    const effectiveStatus = fresh?.status ?? updated.status;
+    const fresh = await getOrderForUser(order.id, req.user!.id, 'supplier');
+    const effectiveStatus = (fresh as { status?: string })?.status ?? updated.status;
 
-    emitTracking(order.id, 'order.status_changed', { status: effectiveStatus });
-    invalidateOrderCaches(order.id);
-    void sendPush({
-      userId: order.consumerUserId,
-      title: next === 'arrived' ? 'Supplier arrived — sign challan' : 'Order update',
-      body:
-        next === 'arrived'
-          ? 'Inspect goods at the door and sign the digital challan to confirm delivery.'
-          : `Status: ${effectiveStatus}`,
-      data: { orderId: order.id, status: effectiveStatus },
-    }).catch(() => undefined);
+    notifyOrderUpdated(
+      {
+        id: order.id,
+        status: effectiveStatus,
+        consumerUserId: order.consumerUserId,
+        supplierUserId: order.supplierUserId,
+      },
+      {
+        reason: `status:${next}`,
+        push: {
+          userId: order.consumerUserId,
+          title: next === 'arrived' ? 'Supplier arrived — sign challan' : 'Order update',
+          body:
+            next === 'arrived'
+              ? 'Inspect goods at the door and sign the digital challan to confirm delivery.'
+              : `Status: ${effectiveStatus}`,
+        },
+      },
+    );
 
-    res.json({ order: fresh ?? updated });
+    res.json({ order: presentOrder(fresh) });
   },
 );
 
@@ -401,7 +477,25 @@ ordersRouter.get('/orders/:id/tracking/live', authenticate, async (req, res) => 
 
 ordersRouter.post('/orders/:id/inspection/start', authenticate, requireRole('consumer'), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
-  if (!['arrived', 'inspection_pending', 'out_for_delivery'].includes(order.status)) {
+
+  // Already in inspection / past doorstep → idempotent.
+  if (order.status === 'inspection_pending') {
+    res.json({
+      order,
+      inspectionWindowSec: config.inspectionWindowSec,
+      alreadyApplied: true,
+    });
+    return;
+  }
+  if (['delivered', 'challan_signed', 'closed', 'rejected_on_spot'].includes(order.status)) {
+    res.json({
+      order,
+      inspectionWindowSec: config.inspectionWindowSec,
+      alreadyApplied: true,
+    });
+    return;
+  }
+  if (!['arrived', 'out_for_delivery'].includes(order.status)) {
     throw new AppError(400, 'INVALID_STATE', 'Order not at doorstep');
   }
   const updated = await prisma.order.update({
@@ -412,6 +506,15 @@ ordersRouter.post('/orders/:id/inspection/start', authenticate, requireRole('con
     },
     include: { digitalChallan: true },
   });
+  notifyOrderUpdated(
+    {
+      id: order.id,
+      status: updated.status,
+      consumerUserId: order.consumerUserId,
+      supplierUserId: order.supplierUserId,
+    },
+    { reason: 'inspection_start' },
+  );
   res.json({ order: updated, inspectionWindowSec: config.inspectionWindowSec });
 });
 
@@ -424,7 +527,9 @@ ordersRouter.post(
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
     const existingChallan = await prisma.digitalChallan.findUnique({ where: { orderId: order.id } });
     if (existingChallan && !existingChallan.isDraft) {
-      throw new AppError(400, 'CHALLAN_ALREADY_SIGNED', 'Cannot adjust after sign');
+      // Idempotent read of already-signed challan
+      res.json({ challan: existingChallan, alreadySigned: true });
+      return;
     }
     const challan = await prisma.digitalChallan.upsert({
       where: { orderId: order.id },
@@ -445,6 +550,14 @@ ordersRouter.post(
       });
     }
 
+    invalidateOrderCaches(order.id);
+    emitTracking(order.id, 'order.updated', {
+      orderId: order.id,
+      status: order.status,
+      reason: 'challan_adjusted',
+      at: Date.now(),
+    });
+
     res.json({ challan });
   },
 );
@@ -456,6 +569,12 @@ ordersRouter.post(
   validateBody(z.object({ reason: z.string(), mediaRef: z.string().optional() })),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
+
+    if (order.status === 'rejected_on_spot') {
+      res.json({ order, alreadyApplied: true });
+      return;
+    }
+
     if (!['arrived', 'inspection_pending'].includes(order.status)) {
       throw new AppError(
         400,
@@ -482,12 +601,22 @@ ordersRouter.post(
       where: { orderId: order.id },
       data: { isDraft: true },
     });
-    void sendPush({
-      userId: order.supplierUserId,
-      title: 'Rejected on spot',
-      body: req.body.reason,
-      data: { orderId: order.id },
-    }).catch(() => undefined);
+    notifyOrderUpdated(
+      {
+        id: order.id,
+        status: updated.status,
+        consumerUserId: order.consumerUserId,
+        supplierUserId: order.supplierUserId,
+      },
+      {
+        reason: 'reject_on_spot',
+        push: {
+          userId: order.supplierUserId,
+          title: 'Rejected on spot',
+          body: req.body.reason,
+        },
+      },
+    );
     res.json({ order: updated });
   },
 );
@@ -499,11 +628,24 @@ ordersRouter.post(
   validateBody(z.object({ signatureRef: z.string().optional() })),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
+
+    // Idempotent: first tap already delivered the order — return existing signed state.
+    if (['delivered', 'challan_signed', 'closed'].includes(order.status)) {
+      const [challan, invoice] = await Promise.all([
+        prisma.digitalChallan.findUnique({ where: { orderId: order.id } }),
+        prisma.gstInvoice.findUnique({ where: { orderId: order.id } }),
+      ]);
+      if (challan && !challan.isDraft) {
+        res.json({ order, challan, invoice, alreadySigned: true });
+        return;
+      }
+    }
+
     if (!['arrived', 'inspection_pending'].includes(order.status)) {
       throw new AppError(
         400,
         'INVALID_STATE',
-        'Sign challan only after the supplier has arrived (doorstep inspection)',
+        `Sign challan only at doorstep (arrived / inspection). Current status: ${order.status}`,
       );
     }
 
@@ -545,26 +687,38 @@ ordersRouter.post(
         data: { active: false, endedAt: new Date() },
       });
 
-      // GST invoice from challan
+      // GST invoice from challan (skip if a concurrent request already created it)
       const invNum = `INV-${o.orderCode}`;
-      const invoice = await tx.gstInvoice.create({
-        data: {
+      const invoice = await tx.gstInvoice.upsert({
+        where: { orderId: o.id },
+        create: {
           orderId: o.id,
           invoiceNumber: invNum,
           lineJson: challan.lineSnapshotJson as object,
         },
+        update: {},
       });
 
       return { order: o, challan, invoice };
     });
 
     await updateSupplierPerformanceOnDelivery(order.supplierUserId, onTime);
-    void sendPush({
-      userId: order.supplierUserId,
-      title: 'Challan signed — delivered',
-      body: 'Consumer signed digital challan. Offline payment can start.',
-      data: { orderId: order.id },
-    }).catch(() => undefined);
+    notifyOrderUpdated(
+      {
+        id: order.id,
+        status: result.order.status,
+        consumerUserId: order.consumerUserId,
+        supplierUserId: order.supplierUserId,
+      },
+      {
+        reason: 'sign_challan',
+        push: {
+          userId: order.supplierUserId,
+          title: 'Challan signed — delivered',
+          body: 'Consumer signed digital challan. Offline payment can start.',
+        },
+      },
+    );
 
     res.json(result);
   },
@@ -771,16 +925,50 @@ ordersRouter.post('/orders/:id/payment/start', authenticate, requireRole('consum
   if (order.status !== 'delivered' && order.status !== 'challan_signed') {
     throw new AppError(400, 'NOT_DELIVERED', 'Payment starts only after delivery/challan');
   }
-  const payment = await prisma.offlinePayment.update({
+
+  const existing = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
+  // Already started (or further) — do not reset timestamps.
+  if (
+    existing &&
+    ['initiated', 'marked_paid_by_consumer', 'confirmed_by_supplier', 'disputed'].includes(
+      existing.status,
+    )
+  ) {
+    res.json({ payment: existing, alreadyApplied: true });
+    return;
+  }
+
+  const payment = await prisma.offlinePayment.upsert({
     where: { orderId: order.id },
-    data: { status: 'initiated', initiatedAt: new Date(), methodNote: req.body?.methodNote },
+    create: {
+      orderId: order.id,
+      status: 'initiated',
+      initiatedAt: new Date(),
+      methodNote: req.body?.methodNote,
+    },
+    update: {
+      status: 'initiated',
+      initiatedAt: new Date(),
+      methodNote: req.body?.methodNote,
+    },
   });
-  void sendPush({
-    userId: order.supplierUserId,
-    title: 'Payment initiated',
-    body: 'Consumer started offline payment',
-    data: { orderId: order.id },
-  }).catch(() => undefined);
+  notifyOrderUpdated(
+    {
+      id: order.id,
+      status: order.status,
+      consumerUserId: order.consumerUserId,
+      supplierUserId: order.supplierUserId,
+    },
+    {
+      paymentStatus: payment.status,
+      reason: 'payment_start',
+      push: {
+        userId: order.supplierUserId,
+        title: 'Payment initiated',
+        body: 'Consumer started offline payment',
+      },
+    },
+  );
   res.json({ payment });
 });
 
@@ -797,7 +985,7 @@ ordersRouter.post(
   ),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
-    if (!['delivered', 'challan_signed'].includes(order.status)) {
+    if (!['delivered', 'challan_signed', 'closed'].includes(order.status)) {
       throw new AppError(
         400,
         'NOT_DELIVERED',
@@ -805,11 +993,30 @@ ordersRouter.post(
       );
     }
     const existing = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
-    if (existing?.status === 'confirmed_by_supplier') {
-      throw new AppError(400, 'ALREADY_CONFIRMED', 'Payment already confirmed by supplier');
+    if (existing?.status === 'confirmed_by_supplier' || order.status === 'closed') {
+      res.json({ payment: existing, alreadyApplied: true });
+      return;
     }
     if (existing?.status === 'disputed') {
       throw new AppError(400, 'PAYMENT_DISPUTED', 'Payment is disputed — resolve first');
+    }
+    if (!existing || existing.status === 'not_started') {
+      throw new AppError(
+        400,
+        'PAYMENT_NOT_STARTED',
+        'Start payment first, then mark paid',
+      );
+    }
+    if (existing.status === 'marked_paid_by_consumer') {
+      res.json({ payment: existing, alreadyApplied: true });
+      return;
+    }
+    if (existing.status !== 'initiated') {
+      throw new AppError(
+        400,
+        'INVALID_PAYMENT_STATE',
+        `Cannot mark paid from status ${existing.status}`,
+      );
     }
     const payment = await prisma.offlinePayment.update({
       where: { orderId: order.id },
@@ -821,18 +1028,36 @@ ordersRouter.post(
         methodNote: req.body.methodNote,
       },
     });
-    void sendPush({
-      userId: order.supplierUserId,
-      title: 'Marked paid',
-      body: 'Confirm when you receive funds',
-      data: { orderId: order.id },
-    }).catch(() => undefined);
+    notifyOrderUpdated(
+      {
+        id: order.id,
+        status: order.status,
+        consumerUserId: order.consumerUserId,
+        supplierUserId: order.supplierUserId,
+      },
+      {
+        paymentStatus: payment.status,
+        reason: 'payment_mark_paid',
+        push: {
+          userId: order.supplierUserId,
+          title: 'Marked paid',
+          body: 'Confirm when you receive funds',
+        },
+      },
+    );
     res.json({ payment });
   },
 );
 
 ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supplier'), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
+
+  if (order.status === 'closed') {
+    const payment = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
+    res.json({ payment, order, alreadyApplied: true });
+    return;
+  }
+
   if (!['delivered', 'challan_signed'].includes(order.status)) {
     throw new AppError(
       400,
@@ -867,13 +1092,23 @@ ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supp
       note: 'Supplier confirmed payment received',
     },
   });
-  emitTracking(order.id, 'order.status_changed', { status: 'closed' });
-  void sendPush({
-    userId: order.consumerUserId,
-    title: 'Order closed',
-    body: 'Supplier confirmed payment. Order is complete.',
-    data: { orderId: order.id },
-  }).catch(() => undefined);
+  notifyOrderUpdated(
+    {
+      id: order.id,
+      status: updated.status,
+      consumerUserId: order.consumerUserId,
+      supplierUserId: order.supplierUserId,
+    },
+    {
+      paymentStatus: payment.status,
+      reason: 'payment_confirm',
+      push: {
+        userId: order.consumerUserId,
+        title: 'Order closed',
+        body: 'Supplier confirmed payment. Order is complete.',
+      },
+    },
+  );
   res.json({ payment, order: updated });
 });
 
@@ -886,9 +1121,34 @@ ordersRouter.post('/orders/:id/payment/dispute', authenticate, requireRole('supp
   if (existing?.status === 'confirmed_by_supplier') {
     throw new AppError(400, 'ALREADY_CONFIRMED', 'Payment already confirmed');
   }
-  const payment = await prisma.offlinePayment.update({
+  if (existing?.status === 'disputed') {
+    res.json({ payment: existing, alreadyApplied: true });
+    return;
+  }
+  const payment = await prisma.offlinePayment.upsert({
     where: { orderId: order.id },
-    data: { status: 'disputed' },
+    create: {
+      orderId: order.id,
+      status: 'disputed',
+    },
+    update: { status: 'disputed' },
   });
+  notifyOrderUpdated(
+    {
+      id: order.id,
+      status: order.status,
+      consumerUserId: order.consumerUserId,
+      supplierUserId: order.supplierUserId,
+    },
+    {
+      paymentStatus: payment.status,
+      reason: 'payment_dispute',
+      push: {
+        userId: order.consumerUserId,
+        title: 'Payment disputed',
+        body: 'Supplier disputed offline payment. Check the order for next steps.',
+      },
+    },
+  );
   res.json({ payment });
 });

@@ -8,17 +8,31 @@ import { AppError, assertFound } from '../../lib/errors';
 import { config } from '../../config';
 import { emitAuction, emitBidzone } from '../../socket';
 import { notifyMany } from '../../lib/notify';
+import {
+  categorySlugs,
+  normalizeProductCategory,
+  shelfRulesForItems,
+} from '../../lib/product-categories';
 
-export const demandRouter = Router();
-
-function batchCode() {
-  const n = Math.floor(Math.random() * 9000) + 1000;
-  return `RI-${n}`;
-}
+const knownCategory = z
+  .string()
+  .min(1)
+  .transform((s, ctx) => {
+    const n = normalizeProductCategory(s);
+    if (!n || !categorySlugs().includes(n)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Unknown product category. Choose one of: ${categorySlugs().join(', ')}`,
+      });
+      return z.NEVER;
+    }
+    return n;
+  });
 
 const createSchema = z.object({
   budgetPaise: z.number().int().positive().optional(),
-  durationHours: z.number().int().positive().default(24),
+  /** Auction length in hours. Use `0` for Instant (30 minutes). */
+  durationHours: z.number().int().min(0).max(7 * 24).default(24),
   deliveryWindow: z.string().optional(),
   privacyAccepted: z.boolean(),
   addressId: z.string().optional(),
@@ -30,12 +44,69 @@ const createSchema = z.object({
         name: z.string().min(1),
         quantity: z.number().positive(),
         unit: z.string().min(1),
-        productCategory: z.string().optional(),
+        productCategory: knownCategory,
         gradeHint: z.string().optional(),
       }),
     )
     .min(1),
 });
+
+/** Resolve auction window seconds from stored durationHours (0 = Instant 30 min). */
+function auctionWindowSec(durationHours: number | null | undefined): number {
+  const h = durationHours ?? 24;
+  // Instant is a fixed short window — never raise it to AUCTION_BASE_WINDOW_SEC
+  // (often 24h in env), which would force "Instant" to last a full day.
+  if (h === 0) {
+    return 30 * 60;
+  }
+  const desiredSec = h * 3600;
+  return Math.min(
+    Math.max(desiredSec, config.auction.baseWindowSec),
+    7 * 24 * 3600,
+  );
+}
+
+const itemSchema = z.object({
+  name: z.string().min(1),
+  quantity: z.number().positive(),
+  unit: z.string().min(1),
+  productCategory: knownCategory,
+  gradeHint: z.string().optional(),
+});
+
+const patchSchema = z
+  .object({
+    deliveryWindow: z.string().min(1).optional(),
+    addressId: z.string().uuid().optional(),
+    items: z.array(itemSchema).min(1).optional(),
+  })
+  .refine((b) => b.deliveryWindow != null || b.addressId != null || b.items != null, {
+    message: 'Provide deliveryWindow, addressId, and/or items',
+  });
+
+function itemsEditPolicy(createdAt: Date, now = new Date()) {
+  const windowSec = config.auction.itemsEditWindowSec;
+  const endsAt = new Date(createdAt.getTime() + windowSec * 1000);
+  const remainingMs = endsAt.getTime() - now.getTime();
+  const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+  return {
+    itemsEditWindowSec: windowSec,
+    itemsEditEndsAt: endsAt,
+    itemsEditSecRemaining: remainingSec,
+    canEditItems: remainingSec > 0,
+  };
+}
+
+function canEditMeta(status: string, liveEndsAt: Date, now = new Date()) {
+  return status === 'open' && liveEndsAt.getTime() > now.getTime();
+}
+
+export const demandRouter = Router();
+
+function batchCode() {
+  const n = Math.floor(Math.random() * 9000) + 1000;
+  return `RI-${n}`;
+}
 
 demandRouter.post(
   '/consumer/bid-requests',
@@ -75,15 +146,8 @@ demandRouter.post(
       deliveryAddress = [address.line, address.city].filter(Boolean).join(', ') || deliveryAddress;
     }
 
-    // Prefer consumer-selected duration; fall back to configured base window.
-    // Clamp so auctions are never shorter than the base window or longer than 7 days.
-    const durationSec = Math.min(
-      Math.max(
-        (body.durationHours ?? 24) * 3600,
-        config.auction.baseWindowSec,
-      ),
-      7 * 24 * 3600,
-    );
+    // Prefer consumer-selected duration; Instant (durationHours=0) = 30 minutes.
+    const durationSec = auctionWindowSec(body.durationHours);
     const liveEndsAt = new Date(Date.now() + durationSec * 1000);
     const bidRequest = await prisma.bidRequest.create({
       data: {
@@ -166,7 +230,15 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
         },
       },
       bids: {
-        where: { status: { in: ['active', 'accepted'] } },
+        where: {
+          OR: [
+            { status: 'accepted' },
+            {
+              status: 'active',
+              OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+            },
+          ],
+        },
         select: {
           id: true,
           amountPaise: true,
@@ -174,11 +246,26 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
           grade: true,
           score: true,
           createdAt: true,
+          expiresAt: true,
         },
         orderBy: { amountPaise: 'asc' },
         take: 10,
       },
-      _count: { select: { bids: true } },
+      _count: {
+        select: {
+          bids: {
+            where: {
+              OR: [
+                { status: 'accepted' },
+                {
+                  status: 'active',
+                  OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+                },
+              ],
+            },
+          },
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
     take,
@@ -194,7 +281,15 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
         consumer: { select: { userId: true } },
         items: true,
         bids: {
-          where: { status: { in: ['active', 'accepted'] } },
+          where: {
+            OR: [
+              { status: 'accepted' },
+              {
+                status: 'active',
+                OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+              },
+            ],
+          },
           include: {
             supplier: {
               select: {
@@ -224,8 +319,197 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
   }
 
   const { consumer: _c, ...rest } = bidRequest;
-  res.json({ bidRequest: rest });
+  const now = new Date();
+  const itemsPolicy = itemsEditPolicy(bidRequest.createdAt, now);
+  res.json({
+    bidRequest: {
+      ...rest,
+      editPolicy: {
+        canEditMeta: canEditMeta(bidRequest.status, bidRequest.liveEndsAt, now),
+        ...itemsPolicy,
+        canEditItems:
+          canEditMeta(bidRequest.status, bidRequest.liveEndsAt, now) &&
+          itemsPolicy.canEditItems,
+      },
+    },
+  });
 });
+
+/** Patch open RFQ: address / delivery window anytime while open; items only for 30s. */
+demandRouter.patch(
+  '/consumer/bid-requests/:id',
+  authenticate,
+  requireRole('consumer'),
+  validateBody(patchSchema),
+  async (req, res) => {
+    const id = requireParam(req, 'id');
+    const body = req.body as z.infer<typeof patchSchema>;
+    const bidRequest = assertFound(
+      await prisma.bidRequest.findUnique({
+        where: { id },
+        include: { consumer: true, items: true },
+      }),
+    );
+    if (bidRequest.consumer.userId !== req.user!.id) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
+    }
+    const now = new Date();
+    if (!canEditMeta(bidRequest.status, bidRequest.liveEndsAt, now)) {
+      throw new AppError(
+        400,
+        'NOT_EDITABLE',
+        'Only open bid requests with time remaining can be edited',
+      );
+    }
+
+    if (body.items) {
+      const policy = itemsEditPolicy(bidRequest.createdAt, now);
+      if (!policy.canEditItems) {
+        throw new AppError(
+          400,
+          'ITEMS_EDIT_LOCKED',
+          `Items can only be edited within ${policy.itemsEditWindowSec} seconds of creating the request`,
+        );
+      }
+    }
+
+    let deliveryLat = bidRequest.lat ?? undefined;
+    let deliveryLng = bidRequest.lng ?? undefined;
+    let deliveryAddress = bidRequest.deliveryAddress ?? undefined;
+
+    if (body.addressId) {
+      const address = await prisma.address.findUnique({ where: { id: body.addressId } });
+      if (!address || address.consumerId !== bidRequest.consumerId) {
+        throw new AppError(404, 'NOT_FOUND', 'Address not found');
+      }
+      deliveryLat = address.lat ?? deliveryLat;
+      deliveryLng = address.lng ?? deliveryLng;
+      deliveryAddress =
+        [address.line, address.city].filter(Boolean).join(', ') || deliveryAddress;
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (body.items) {
+        await tx.bidRequestItem.deleteMany({ where: { bidRequestId: id } });
+        await tx.bidRequestItem.createMany({
+          data: body.items.map((i) => ({
+            bidRequestId: id,
+            name: i.name,
+            quantity: i.quantity,
+            unit: i.unit,
+            productCategory: i.productCategory,
+            gradeHint: i.gradeHint,
+          })),
+        });
+      }
+
+      return tx.bidRequest.update({
+        where: { id },
+        data: {
+          ...(body.deliveryWindow != null ? { deliveryWindow: body.deliveryWindow } : {}),
+          ...(body.addressId
+            ? {
+                deliveryAddress,
+                lat: deliveryLat,
+                lng: deliveryLng,
+              }
+            : {}),
+        },
+        include: { items: true },
+      });
+    });
+
+    emitAuction(id, 'auction.updated', {
+      bidRequestId: id,
+      deliveryWindow: updated.deliveryWindow,
+      itemCount: updated.items.length,
+    });
+    emitBidzone('all', 'demand.request_updated', {
+      id,
+      batchCode: updated.batchCode,
+      itemCount: updated.items.length,
+      liveEndsAt: updated.liveEndsAt,
+    });
+
+    const itemsPolicy = itemsEditPolicy(updated.createdAt, new Date());
+    res.json({
+      bidRequest: {
+        ...updated,
+        editPolicy: {
+          canEditMeta: canEditMeta(updated.status, updated.liveEndsAt),
+          ...itemsPolicy,
+          canEditItems:
+            canEditMeta(updated.status, updated.liveEndsAt) && itemsPolicy.canEditItems,
+        },
+      },
+      message: 'Bid request updated',
+    });
+  },
+);
+
+/** Cancel an open bid request before the auction timer ends (consumer only). */
+demandRouter.post(
+  '/consumer/bid-requests/:id/cancel',
+  authenticate,
+  requireRole('consumer'),
+  async (req, res) => {
+    const id = requireParam(req, 'id');
+    const bidRequest = assertFound(
+      await prisma.bidRequest.findUnique({
+        where: { id },
+        include: { consumer: { select: { userId: true } } },
+      }),
+    );
+    if (bidRequest.consumer.userId !== req.user!.id) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
+    }
+    if (bidRequest.status !== 'open') {
+      throw new AppError(
+        400,
+        'NOT_OPEN',
+        bidRequest.status === 'cancelled'
+          ? 'This request is already cancelled'
+          : 'Only open bid requests can be cancelled',
+      );
+    }
+    if (bidRequest.liveEndsAt.getTime() <= Date.now()) {
+      throw new AppError(
+        400,
+        'EXPIRED',
+        'Auction timer has already finished — cannot cancel',
+      );
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const live = await tx.bidRequest.updateMany({
+        where: { id, status: 'open' },
+        data: { status: 'cancelled' },
+      });
+      if (live.count === 0) {
+        throw new AppError(400, 'NOT_OPEN', 'Request is no longer open');
+      }
+      await tx.bid.updateMany({
+        where: { bidRequestId: id, status: 'active' },
+        data: { status: 'expired' },
+      });
+      return tx.bidRequest.findUnique({
+        where: { id },
+        include: { items: true },
+      });
+    });
+
+    emitAuction(id, 'auction.cancelled', {
+      bidRequestId: id,
+      status: 'cancelled',
+    });
+    emitBidzone('all', 'demand.request_cancelled', {
+      id,
+      batchCode: bidRequest.batchCode,
+    });
+
+    res.json({ bidRequest: updated, message: 'Bid request cancelled' });
+  },
+);
 
 demandRouter.post(
   '/consumer/bid-requests/:id/reorder',
@@ -242,13 +526,7 @@ demandRouter.post(
       throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
     }
 
-    const durationSec = Math.min(
-      Math.max(
-        (original.durationHours ?? 24) * 3600,
-        config.auction.baseWindowSec,
-      ),
-      7 * 24 * 3600,
-    );
+    const durationSec = auctionWindowSec(original.durationHours);
     const liveEndsAt = new Date(Date.now() + durationSec * 1000);
     const bidRequest = await prisma.bidRequest.create({
       data: {

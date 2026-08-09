@@ -2,11 +2,13 @@ import { Router } from 'express';
 import { prisma } from '../../lib/prisma';
 import { authenticate, requireRole } from '../../middleware/auth';
 import { responseCacheGet, responseCacheSet } from '../../lib/response-cache';
+import { PRODUCT_CATEGORIES } from '../../lib/product-categories';
 
 export const dashboardRouter = Router();
 
-/** Category shortlist — avoids an extra Tokyo round-trip for shelf-life matrix. */
-const FALLBACK_CATEGORIES = ['Produce', 'Dairy', 'Dry Goods', 'Oils', 'Meat'];
+/** Category cart from product doc (for chip filters / spend buckets). */
+const PRODUCT_CATEGORY_SLUGS = PRODUCT_CATEGORIES.map((c) => c.productCategory);
+const FALLBACK_CATEGORIES = PRODUCT_CATEGORY_SLUGS;
 const DASHBOARD_TTL_MS = 20_000;
 
 dashboardRouter.get('/consumer/dashboard', authenticate, requireRole('consumer'), async (req, res) => {

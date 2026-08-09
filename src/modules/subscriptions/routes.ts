@@ -27,7 +27,11 @@ subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
     const profile = await prisma.supplierProfile.findUnique({ where: { userId: req.user!.id } });
     if (profile) {
       activeBids = await prisma.bid.count({
-        where: { supplierId: profile.id, status: 'active' },
+        where: {
+          supplierId: profile.id,
+          status: 'active',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        },
       });
     }
   }

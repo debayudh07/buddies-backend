@@ -12,8 +12,31 @@ import { config } from '../../config';
 import { emitAuction } from '../../socket';
 import { sendPush } from '../../lib/notify';
 import { createOrderFromAcceptedBid } from '../orders/service';
+import { shelfRulesForItems } from '../../lib/product-categories';
 
 export const bidzoneRouter = Router();
+
+/** Prisma filter: status active and past bid TTL not elapsed. */
+function activeUnexpiredWhere(now = new Date()) {
+  return {
+    status: 'active' as const,
+    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+  };
+}
+
+function computeBidExpiresAt(auctionLiveEndsAt: Date, from = new Date()): Date {
+  const ttlEnd = new Date(from.getTime() + config.auction.bidTtlSec * 1000);
+  return ttlEnd.getTime() < auctionLiveEndsAt.getTime() ? ttlEnd : auctionLiveEndsAt;
+}
+
+function isBidStillLive(bid: {
+  status: string;
+  expiresAt?: Date | null;
+}): boolean {
+  if (bid.status !== 'active') return false;
+  if (bid.expiresAt && bid.expiresAt.getTime() <= Date.now()) return false;
+  return true;
+}
 
 async function requireVerifiedSupplier(userId: string) {
   const profile = await prisma.supplierProfile.findUnique({ where: { userId } });
@@ -55,7 +78,11 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
     prisma.order.count({
       where: { supplierUserId: userId, status: { in: ['delivered', 'closed', 'challan_signed'] } },
     }),
-    profile ? prisma.bid.count({ where: { supplierId: profile.id, status: 'active' } }) : Promise.resolve(0),
+    profile
+      ? prisma.bid.count({
+          where: { supplierId: profile.id, ...activeUnexpiredWhere() },
+        })
+      : Promise.resolve(0),
     profile ? prisma.bid.count({ where: { supplierId: profile.id, status: 'accepted' } }) : Promise.resolve(0),
     profile ? prisma.bid.count({ where: { supplierId: profile.id, status: 'rejected' } }) : Promise.resolve(0),
     profile ? prisma.bid.count({ where: { supplierId: profile.id, status: 'withdrawn' } }) : Promise.resolve(0),
@@ -144,7 +171,9 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
   const [bidCap, activeBidCount] = await Promise.all([
     getSupplierBidCap(req.user!.id),
     profile
-      ? prisma.bid.count({ where: { supplierId: profile.id, status: 'active' } })
+      ? prisma.bid.count({
+          where: { supplierId: profile.id, ...activeUnexpiredWhere() },
+        })
       : Promise.resolve(0),
   ]);
   const now = new Date();
@@ -169,7 +198,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
         },
       },
       bids: {
-        where: { status: 'active' },
+        where: activeUnexpiredWhere(now),
         orderBy: { amountPaise: 'asc' },
         take: 1,
         select: { amountPaise: true, supplierId: true },
@@ -196,6 +225,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       liveEndsAt: r.liveEndsAt,
       extendCount: r.extendCount,
       items: r.items,
+      shelfRules: shelfRulesForItems(r.items),
       distanceKm,
       // Masked — no consumer address / restaurant name
       locationHint: distanceKm != null ? `~${distanceKm} km away` : 'Nearby',
@@ -222,9 +252,9 @@ const placeBidSchema = z.object({
   bidRequestId: z.string().min(1),
   amountPaise: z.coerce.number().int().positive(),
   grade: z.string().min(1).default('A'),
-  // Defaults keep older clients working; supplier UI should still send these.
-  shelfLifeDays: z.coerce.number().int().positive().default(7),
-  rslDaysAtDelivery: z.coerce.number().int().nonnegative().default(3),
+  // Defaults keep older clients working; supplier UI should still send category-aware values.
+  shelfLifeDays: z.coerce.number().int().positive().default(5),
+  rslDaysAtDelivery: z.coerce.number().int().nonnegative().default(2),
   notes: z.string().optional(),
 });
 
@@ -239,7 +269,7 @@ bidzoneRouter.post(
 
     const cap = await getSupplierBidCap(req.user!.id);
     const activeCount = await prisma.bid.count({
-      where: { supplierId: profile.id, status: 'active' },
+      where: { supplierId: profile.id, ...activeUnexpiredWhere() },
     });
     if (activeCount >= cap) {
       throw new AppError(403, 'BID_QUOTA_EXCEEDED', `Max ${cap} concurrent bids; upgrade to premium`);
@@ -254,9 +284,33 @@ bidzoneRouter.post(
     if (!body.grade || body.rslDaysAtDelivery < 0) {
       throw new AppError(400, 'RSL_REQUIRED', 'Grade and RSL required');
     }
+    if (body.rslDaysAtDelivery > body.shelfLifeDays) {
+      throw new AppError(
+        400,
+        'RSL_EXCEEDS_SHELF',
+        'Remaining shelf life (RSL) cannot exceed total shelf life',
+      );
+    }
+
+    // Enforce product-doc Minimum RSL matrix for cart categories on this RFQ.
+    const rules = shelfRulesForItems(bidRequest.items);
+    if (body.rslDaysAtDelivery < rules.minRslDays) {
+      throw new AppError(
+        400,
+        'RSL_BELOW_MATRIX',
+        `Minimum RSL for this request is ${rules.minRslDays} day(s) at delivery (category matrix). You entered ${body.rslDaysAtDelivery}.`,
+      );
+    }
+    if (body.shelfLifeDays < rules.minRslDays) {
+      throw new AppError(
+        400,
+        'SHELF_BELOW_MATRIX',
+        `Total shelf life must be at least ${rules.minRslDays} day(s) for this category cart.`,
+      );
+    }
 
     const best = await prisma.bid.findFirst({
-      where: { bidRequestId: bidRequest.id, status: 'active' },
+      where: { bidRequestId: bidRequest.id, ...activeUnexpiredWhere() },
       orderBy: { amountPaise: 'asc' },
     });
     const minDecrementPaise = config.auction.minDecrementPaise;
@@ -285,6 +339,7 @@ bidzoneRouter.post(
       amountPaise: body.amountPaise,
       budgetPaise: bidRequest.budgetPaise,
       rslDays: body.rslDaysAtDelivery,
+      minRslDays: rules.minRslDays,
       distanceKm,
       onTimeRate: profile.onTimeRate,
       rating: profile.rating,
@@ -306,6 +361,8 @@ bidzoneRouter.post(
       });
     }
 
+    const bidExpiresAt = computeBidExpiresAt(liveEndsAt);
+
     const bid = await prisma.bid.create({
       data: {
         bidRequestId: bidRequest.id,
@@ -318,7 +375,7 @@ bidzoneRouter.post(
         score,
         scoreBreakdown: breakdown,
         distanceKm,
-        expiresAt: liveEndsAt,
+        expiresAt: bidExpiresAt,
       },
       include: {
         supplier: {
@@ -331,6 +388,8 @@ bidzoneRouter.post(
       bid,
       liveEndsAt,
       extendCount,
+      bidExpiresAt,
+      bidTtlSec: config.auction.bidTtlSec,
     });
 
     const consumer = await prisma.consumerProfile.findUnique({ where: { id: bidRequest.consumerId } });
@@ -338,12 +397,18 @@ bidzoneRouter.post(
       void sendPush({
         userId: consumer.userId,
         title: 'New bid',
-        body: `${profile.publicLabel} bid ₹${(body.amountPaise / 100).toFixed(0)}`,
+        body: `${profile.publicLabel} bid ₹${(body.amountPaise / 100).toFixed(0)} (active ${Math.round(config.auction.bidTtlSec / 60)} min)`,
         data: { bidRequestId: bidRequest.id, bidId: bid.id },
       }).catch(() => undefined);
     }
 
-    res.status(201).json({ bid, liveEndsAt, extendCount });
+    res.status(201).json({
+      bid,
+      liveEndsAt,
+      extendCount,
+      bidExpiresAt,
+      bidTtlSec: config.auction.bidTtlSec,
+    });
   },
 );
 
@@ -364,8 +429,13 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
             select: { restaurantName: true, city: true, lat: true, lng: true },
           },
           bids: {
-            where: { status: { in: ['active', 'accepted'] } },
-            select: { id: true, amountPaise: true, status: true },
+            where: {
+              OR: [
+                { status: 'accepted' },
+                activeUnexpiredWhere(),
+              ],
+            },
+            select: { id: true, amountPaise: true, status: true, expiresAt: true },
             orderBy: { amountPaise: 'asc' },
             take: 25,
           },
@@ -378,13 +448,16 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
   });
 
   const enriched = bids.map((b) => {
-    const peerBids = b.bidRequest.bids;
+    const peerBids = b.bidRequest.bids.filter(
+      (x) => x.status === 'accepted' || isBidStillLive(x),
+    );
     const competing = peerBids.filter((x) => x.id !== b.id);
     const bestOther = competing[0]?.amountPaise ?? null;
     const sortedAsc = [...peerBids].sort((a, c) => a.amountPaise - c.amountPaise);
     const bidRank = Math.max(1, sortedAsc.findIndex((x) => x.id === b.id) + 1);
+    const stillLive = isBidStillLive(b);
     const isLeading =
-      b.status === 'active' && (bestOther == null || b.amountPaise <= bestOther);
+      stillLive && (bestOther == null || b.amountPaise <= bestOther);
 
     const reqLat = b.bidRequest.lat ?? b.bidRequest.consumer.lat;
     const reqLng = b.bidRequest.lng ?? b.bidRequest.consumer.lng;
@@ -432,13 +505,18 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
     const waitingConsumerAck =
       b.status === 'accepted' && !!b.supplierAckAt && !b.consumerAckAt && !b.order;
     let statusHint = '';
+    const ttlMin = Math.max(1, Math.round(config.auction.bidTtlSec / 60));
     switch (b.status) {
       case 'active':
-        statusHint = isLeading
-          ? 'You are the lowest bid — waiting for the consumer to choose.'
-          : bestOther != null
-            ? `Another bid is lower (₹${Math.round(bestOther / 100)}). Auction still open.`
-            : 'Auction open — waiting for the consumer to choose.';
+        if (!stillLive) {
+          statusHint = `This bid expired after ${ttlMin} minute${ttlMin === 1 ? '' : 's'}. Place a new bid if the auction is still open.`;
+        } else {
+          statusHint = isLeading
+            ? `Leading bid — live for up to ${ttlMin} min. Waiting for the consumer.`
+            : bestOther != null
+              ? `Another bid is lower (₹${Math.round(bestOther / 100)}). Your bid stays live up to ${ttlMin} min.`
+              : `Auction open — your bid stays live up to ${ttlMin} min.`;
+        }
         break;
       case 'accepted':
         if (b.order) {
@@ -460,7 +538,7 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
         statusHint = 'You withdrew this bid.';
         break;
       case 'expired':
-        statusHint = 'Auction ended without your bid winning.';
+        statusHint = `Bid expired (max ${ttlMin} min active) or auction closed without your bid winning.`;
         break;
       default:
         statusHint = b.status;
@@ -476,7 +554,7 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       shelfLifeDays: b.shelfLifeDays,
       rslDaysAtDelivery: b.rslDaysAtDelivery,
       notes: b.notes,
-      status: b.status,
+      status: stillLive ? b.status : b.status === 'active' ? 'expired' : b.status,
       statusHint,
       score: b.score,
       distanceKm,
@@ -484,6 +562,8 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       consumerAckAt: b.consumerAckAt,
       supplierAckAt: b.supplierAckAt,
       acceptedAt: b.acceptedAt,
+      expiresAt: b.expiresAt,
+      bidTtlSec: config.auction.bidTtlSec,
       createdAt: b.createdAt,
       updatedAt: b.updatedAt,
       batchCode: b.bidRequest.batchCode,
@@ -518,7 +598,7 @@ bidzoneRouter.post('/supplier/bids/:id/withdraw', authenticate, requireRole('sup
   const profile = await requireVerifiedSupplier(req.user!.id);
   const bid = assertFound(await prisma.bid.findUnique({ where: { id: requireParam(req, 'id') } }));
   if (bid.supplierId !== profile.id) throw new AppError(403, 'FORBIDDEN', 'Not your bid');
-  if (bid.status !== 'active') throw new AppError(400, 'INVALID_STATE', 'Bid not active');
+  if (!isBidStillLive(bid)) throw new AppError(400, 'INVALID_STATE', 'Bid not active or expired');
   const updated = await prisma.bid.update({
     where: { id: bid.id },
     data: { status: 'withdrawn' },
@@ -547,7 +627,7 @@ bidzoneRouter.get(
     const bids = await prisma.bid.findMany({
       where: {
         bidRequestId,
-        status: { in: ['active', 'accepted'] },
+        OR: [{ status: 'accepted' }, activeUnexpiredWhere()],
       },
       include: {
         supplier: {
@@ -565,7 +645,7 @@ bidzoneRouter.get(
       },
       orderBy: { score: 'desc' },
     });
-    res.json({ bids });
+    res.json({ bids, bidTtlSec: config.auction.bidTtlSec });
   },
 );
 
@@ -585,7 +665,13 @@ bidzoneRouter.post(
     if (bid.bidRequest.consumer.userId !== req.user!.id) {
       throw new AppError(403, 'FORBIDDEN', 'Not your request');
     }
-    if (bid.status !== 'active') throw new AppError(400, 'INVALID_STATE', 'Bid not active');
+    if (!isBidStillLive(bid)) {
+      throw new AppError(
+        400,
+        'BID_EXPIRED',
+        `This bid is no longer active (max ${Math.round(config.auction.bidTtlSec / 60)} minutes). Ask the supplier to rebid.`,
+      );
+    }
     if (bid.bidRequest.status !== 'open') throw new AppError(400, 'NOT_OPEN', 'Already awarded');
 
     // Single transaction: award + reject peers (order create next under race-safe path)
@@ -598,9 +684,12 @@ bidzoneRouter.post(
         if (!current || current.status !== 'open') {
           throw new AppError(400, 'NOT_OPEN', 'Already awarded');
         }
-        const live = await tx.bid.findUnique({ where: { id: bid.id }, select: { status: true } });
-        if (!live || live.status !== 'active') {
-          throw new AppError(400, 'INVALID_STATE', 'Bid not active');
+        const live = await tx.bid.findUnique({
+          where: { id: bid.id },
+          select: { status: true, expiresAt: true },
+        });
+        if (!live || !isBidStillLive(live)) {
+          throw new AppError(400, 'BID_EXPIRED', 'Bid not active');
         }
         await tx.bid.update({
           where: { id: bid.id },
@@ -611,7 +700,11 @@ bidzoneRouter.post(
           },
         });
         await tx.bid.updateMany({
-          where: { bidRequestId: bid.bidRequestId, id: { not: bid.id }, status: 'active' },
+          where: {
+            bidRequestId: bid.bidRequestId,
+            id: { not: bid.id },
+            status: 'active',
+          },
           data: { status: 'rejected' },
         });
         await tx.bidRequest.update({
@@ -655,8 +748,8 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
   if (bid.bidRequest.consumer.userId !== req.user!.id) {
     throw new AppError(403, 'FORBIDDEN', 'Not your request');
   }
-  if (bid.status !== 'active') {
-    throw new AppError(400, 'INVALID_STATE', 'Only active bids can be rejected');
+  if (!isBidStillLive(bid)) {
+    throw new AppError(400, 'INVALID_STATE', 'Only active (non-expired) bids can be rejected');
   }
   if (bid.bidRequest.status !== 'open') {
     throw new AppError(400, 'NOT_OPEN', 'Auction is no longer open');
