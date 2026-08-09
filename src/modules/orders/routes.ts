@@ -456,6 +456,13 @@ ordersRouter.post(
   validateBody(z.object({ reason: z.string(), mediaRef: z.string().optional() })),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
+    if (!['arrived', 'inspection_pending'].includes(order.status)) {
+      throw new AppError(
+        400,
+        'INVALID_STATE',
+        'Reject on spot only at doorstep (after supplier marks arrived)',
+      );
+    }
     const existingChallan = await prisma.digitalChallan.findUnique({ where: { orderId: order.id } });
     if (existingChallan && !existingChallan.isDraft) {
       throw new AppError(400, 'CHALLAN_ALREADY_SIGNED', 'Already signed');
@@ -492,8 +499,12 @@ ordersRouter.post(
   validateBody(z.object({ signatureRef: z.string().optional() })),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
-    if (['rejected_on_spot', 'delivered', 'challan_signed', 'closed'].includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATE', 'Cannot sign in current state');
+    if (!['arrived', 'inspection_pending'].includes(order.status)) {
+      throw new AppError(
+        400,
+        'INVALID_STATE',
+        'Sign challan only after the supplier has arrived (doorstep inspection)',
+      );
     }
 
     const onTime = !order.slaDeadlineAt || new Date() <= order.slaDeadlineAt;
@@ -786,6 +797,20 @@ ordersRouter.post(
   ),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'consumer');
+    if (!['delivered', 'challan_signed'].includes(order.status)) {
+      throw new AppError(
+        400,
+        'NOT_DELIVERED',
+        'Mark paid only after delivery (challan signed)',
+      );
+    }
+    const existing = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
+    if (existing?.status === 'confirmed_by_supplier') {
+      throw new AppError(400, 'ALREADY_CONFIRMED', 'Payment already confirmed by supplier');
+    }
+    if (existing?.status === 'disputed') {
+      throw new AppError(400, 'PAYMENT_DISPUTED', 'Payment is disputed — resolve first');
+    }
     const payment = await prisma.offlinePayment.update({
       where: { orderId: order.id },
       data: {
@@ -854,6 +879,13 @@ ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supp
 
 ordersRouter.post('/orders/:id/payment/dispute', authenticate, requireRole('supplier'), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
+  if (!['delivered', 'challan_signed'].includes(order.status)) {
+    throw new AppError(400, 'NOT_READY', 'Dispute only after delivery/challan');
+  }
+  const existing = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
+  if (existing?.status === 'confirmed_by_supplier') {
+    throw new AppError(400, 'ALREADY_CONFIRMED', 'Payment already confirmed');
+  }
   const payment = await prisma.offlinePayment.update({
     where: { orderId: order.id },
     data: { status: 'disputed' },

@@ -43,6 +43,7 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
     ordersByStatusRaw,
     recentOrders,
     recentBids,
+    bidCap,
   ] = await Promise.all([
     prisma.bidRequest.count({ where: { status: 'open', liveEndsAt: { gt: new Date() } } }),
     prisma.order.count({
@@ -73,6 +74,7 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
           select: { createdAt: true },
         })
       : Promise.resolve([] as { createdAt: Date }[]),
+    getSupplierBidCap(userId),
   ]);
 
   const dayKeys: string[] = [];
@@ -103,6 +105,11 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
     activeOrders,
     activeBids,
     completedOrders,
+    bidQuota: {
+      cap: bidCap,
+      used: activeBids,
+      remaining: Math.max(0, bidCap - activeBids),
+    },
     performance: profile
       ? {
           rating: profile.rating,
@@ -134,6 +141,12 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
     where: { userId: req.user!.id },
     select: { id: true, lat: true, lng: true, kycStatus: true },
   });
+  const [bidCap, activeBidCount] = await Promise.all([
+    getSupplierBidCap(req.user!.id),
+    profile
+      ? prisma.bid.count({ where: { supplierId: profile.id, status: 'active' } })
+      : Promise.resolve(0),
+  ]);
   const now = new Date();
   const requests = await prisma.bidRequest.findMany({
     where: { status: 'open', liveEndsAt: { gt: now } },
@@ -192,10 +205,16 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
     };
   });
 
+  const remaining = Math.max(0, bidCap - activeBidCount);
   res.json({
     feed,
     kycStatus: profile?.kycStatus ?? 'draft',
-    canBid: profile?.kycStatus === 'verified',
+    canBid: profile?.kycStatus === 'verified' && remaining > 0,
+    bidQuota: {
+      cap: bidCap,
+      used: activeBidCount,
+      remaining,
+    },
   });
 });
 
@@ -424,14 +443,14 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       case 'accepted':
         if (b.order) {
           statusHint = needsSupplierAck
-            ? `You won — order ${b.order.orderCode} is open. Acknowledge & start preparing.`
+            ? `You won — order ${b.order.orderCode} is open. Confirm you received it (optional), then start preparing.`
             : `Won — order ${b.order.orderCode} · ${b.order.status}.`;
         } else if (needsSupplierAck) {
-          statusHint = 'You won — acknowledge to open the order.';
+          statusHint = 'You won — order is open; confirm receipt is optional.';
         } else if (waitingConsumerAck) {
-          statusHint = 'You acknowledged — waiting for the consumer.';
+          statusHint = 'You confirmed — waiting for the consumer (legacy).';
         } else {
-          statusHint = 'Accepted — order is being created.';
+          statusHint = 'Accepted — order is open (bind-on-accept).';
         }
         break;
       case 'rejected':
@@ -508,15 +527,26 @@ bidzoneRouter.post('/supplier/bids/:id/withdraw', authenticate, requireRole('sup
   res.json({ bid: updated });
 });
 
-/** Consumer: list scored bids */
+/** Consumer: list scored bids (owner of RFQ only) */
 bidzoneRouter.get(
   '/consumer/bid-requests/:id/bids',
   authenticate,
   requireRole('consumer'),
   async (req, res) => {
+    const bidRequestId = requireParam(req, 'id');
+    const bidRequest = assertFound(
+      await prisma.bidRequest.findUnique({
+        where: { id: bidRequestId },
+        include: { consumer: { select: { userId: true } } },
+      }),
+    );
+    if (bidRequest.consumer.userId !== req.user!.id && req.user!.role !== 'admin') {
+      throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
+    }
+
     const bids = await prisma.bid.findMany({
       where: {
-        bidRequestId: requireParam(req, 'id'),
+        bidRequestId,
         status: { in: ['active', 'accepted'] },
       },
       include: {
@@ -539,15 +569,16 @@ bidzoneRouter.get(
   },
 );
 
-/** Bind-on-accept */
+/** Bind-on-accept — creates order atomically with status flip */
 bidzoneRouter.post(
   '/consumer/bids/:id/accept',
   authenticate,
   requireRole('consumer'),
   async (req, res) => {
+    const bidId = requireParam(req, 'id');
     const bid = assertFound(
       await prisma.bid.findUnique({
-        where: { id: requireParam(req, 'id') },
+        where: { id: bidId },
         include: { bidRequest: { include: { consumer: true } }, supplier: true },
       }),
     );
@@ -557,25 +588,41 @@ bidzoneRouter.post(
     if (bid.status !== 'active') throw new AppError(400, 'INVALID_STATE', 'Bid not active');
     if (bid.bidRequest.status !== 'open') throw new AppError(400, 'NOT_OPEN', 'Already awarded');
 
-    await prisma.$transaction([
-      prisma.bid.update({
-        where: { id: bid.id },
-        // Accept is the consumer's binding acknowledgement — open the order immediately.
-        data: {
-          status: 'accepted',
-          acceptedAt: new Date(),
-          consumerAckAt: new Date(),
-        },
-      }),
-      prisma.bid.updateMany({
-        where: { bidRequestId: bid.bidRequestId, id: { not: bid.id }, status: 'active' },
-        data: { status: 'rejected' },
-      }),
-      prisma.bidRequest.update({
-        where: { id: bid.bidRequestId },
-        data: { status: 'awarded', winningBidId: bid.id },
-      }),
-    ]);
+    // Single transaction: award + reject peers (order create next under race-safe path)
+    try {
+      await prisma.$transaction(async (tx) => {
+        const current = await tx.bidRequest.findUnique({
+          where: { id: bid.bidRequestId },
+          select: { status: true },
+        });
+        if (!current || current.status !== 'open') {
+          throw new AppError(400, 'NOT_OPEN', 'Already awarded');
+        }
+        const live = await tx.bid.findUnique({ where: { id: bid.id }, select: { status: true } });
+        if (!live || live.status !== 'active') {
+          throw new AppError(400, 'INVALID_STATE', 'Bid not active');
+        }
+        await tx.bid.update({
+          where: { id: bid.id },
+          data: {
+            status: 'accepted',
+            acceptedAt: new Date(),
+            consumerAckAt: new Date(),
+          },
+        });
+        await tx.bid.updateMany({
+          where: { bidRequestId: bid.bidRequestId, id: { not: bid.id }, status: 'active' },
+          data: { status: 'rejected' },
+        });
+        await tx.bidRequest.update({
+          where: { id: bid.bidRequestId },
+          data: { status: 'awarded', winningBidId: bid.id },
+        });
+      });
+    } catch (e) {
+      if (e instanceof AppError) throw e;
+      throw e;
+    }
 
     const order = await createOrderFromAcceptedBid(bid.id);
 
@@ -608,6 +655,12 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
   if (bid.bidRequest.consumer.userId !== req.user!.id) {
     throw new AppError(403, 'FORBIDDEN', 'Not your request');
   }
+  if (bid.status !== 'active') {
+    throw new AppError(400, 'INVALID_STATE', 'Only active bids can be rejected');
+  }
+  if (bid.bidRequest.status !== 'open') {
+    throw new AppError(400, 'NOT_OPEN', 'Auction is no longer open');
+  }
   const updated = await prisma.bid.update({ where: { id: bid.id }, data: { status: 'rejected' } });
   emitAuction(bid.bidRequestId, 'auction.bid_rejected', { bidId: bid.id });
   res.json({ bid: updated });
@@ -615,6 +668,10 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
 
 const ackSchema = z.object({ role: z.enum(['consumer', 'supplier']) });
 
+/**
+ * Optional party ack timestamps. Order is already created on consumer accept (bind-on-accept).
+ * Supplier ack is informational only and never blocks fulfillment.
+ */
 bidzoneRouter.post(
   '/bids/:id/acknowledge',
   authenticate,
@@ -652,10 +709,16 @@ bidzoneRouter.post(
       },
     });
 
+    // Legacy safety: rare pre-bind drafts — create order if consumer ack exists without order.
     if (refreshed?.consumerAckAt && !refreshed.order) {
       const order = await createOrderFromAcceptedBid(refreshed.id);
       emitAuction(bid.bidRequestId, 'order.created', { orderId: order.id });
-      return res.json({ acknowledged: true, order });
+      return res.json({
+        acknowledged: true,
+        order,
+        bindOnAccept: false,
+        note: 'Order created from legacy dual-ack path',
+      });
     }
 
     if (refreshed?.order && role === 'supplier' && refreshed.supplierAckAt) {
@@ -668,7 +731,8 @@ bidzoneRouter.post(
     res.json({
       acknowledged: true,
       order: refreshed?.order ?? undefined,
-      awaiting: !refreshed?.supplierAckAt ? 'supplier' : undefined,
+      // Informational only — fulfillment is never blocked on supplier ack.
+      supplierAckOptional: true,
     });
   },
 );

@@ -56,7 +56,7 @@ messagingRouter.get('/orders/:id/chat', authenticate, async (req, res) => {
       },
     },
   });
-  if (!thread) throw new AppError(404, 'NO_THREAD', 'Chat opens after dual ack');
+  if (!thread) throw new AppError(404, 'NO_THREAD', 'Chat opens after the consumer accepts a bid');
   if (
     thread.consumerUserId !== req.user!.id &&
     thread.supplierUserId !== req.user!.id
@@ -66,7 +66,7 @@ messagingRouter.get('/orders/:id/chat', authenticate, async (req, res) => {
 
   const { messages: recent, ...threadMeta } = thread;
   const messages = [...recent].reverse();
-  res.json({ thread: threadMeta, messages });
+  res.json({ thread: threadMeta, threadId: threadMeta.id, messages });
 });
 
 messagingRouter.post(
@@ -99,5 +99,22 @@ messagingRouter.post(
     }).catch(() => undefined);
 
     res.status(201).json({ message });
+  },
+);
+
+/** Peer typing indicator (broadcast only — not persisted). */
+messagingRouter.post(
+  '/orders/:id/chat/typing',
+  authenticate,
+  validateBody(z.object({ typing: z.boolean() })),
+  async (req, res) => {
+    const order = await assertOrderMember(requireParam(req, 'id'), req.user!.id);
+    if (!order.chatThread) throw new AppError(404, 'NO_THREAD', 'No chat thread');
+    emitChat(order.chatThread.id, 'chat.typing', {
+      typing: req.body.typing === true,
+      userId: req.user!.id,
+      orderId: order.id,
+    });
+    res.json({ ok: true });
   },
 );

@@ -2,6 +2,7 @@ import { prisma } from '../lib/prisma';
 import { config } from '../config';
 import { sendPush } from '../lib/notify';
 import { logger } from '../lib/logger';
+import { expireSubscriptions } from '../modules/subscriptions/service';
 
 export type WorkerTickResult = { processed: number };
 
@@ -20,6 +21,13 @@ export async function tickAuctionExpiry(): Promise<WorkerTickResult> {
     logger.info('worker', 'expired auctions', { count: expired.count });
   }
   return { processed: expired.count };
+}
+
+/** Deactivate subscriptions past endsAt so premium bid caps do not stick. */
+export async function tickSubscriptionExpiry(): Promise<WorkerTickResult> {
+  const count = await expireSubscriptions();
+  if (count) logger.info('worker', 'expired subscriptions', { count });
+  return { processed: count };
 }
 
 /** Mark orders past slaDeadlineAt as breached + notify supplier. */
@@ -104,5 +112,9 @@ export function startWorkers() {
     void tickTrackingStale().catch((e) => console.error('[worker:tracking]', e));
   }, 60_000);
 
-  console.log('[workers] auction expiry, SLA, tracking-stale timers started');
+  setInterval(() => {
+    void tickSubscriptionExpiry().catch((e) => console.error('[worker:subs]', e));
+  }, 60_000);
+
+  console.log('[workers] auction, SLA, tracking-stale, subscription-expiry timers started');
 }

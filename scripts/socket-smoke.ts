@@ -194,25 +194,29 @@ async function main() {
   }
   pass('auction.bid_placed', bidId);
 
-  const acceptEvt = waitForEvent<any>(socket, 'auction.bid_accepted', 45_000);
-  await api('POST', `/consumer/bids/${bidId}/accept`, C);
+  const orderEvt = waitForEvent<any>(socket, 'order.created', 60_000);
+  const acceptRes = await api('POST', `/consumer/bids/${bidId}/accept`, C);
   await acceptEvt;
   pass('auction.bid_accepted');
 
-  // Register listener immediately before the ack that creates the order (DB can be slow)
-  await api('POST', `/bids/${bidId}/acknowledge`, C, { role: 'consumer' });
-  const orderEvt = waitForEvent<any>(socket, 'order.created', 60_000);
-  const ack = await api('POST', `/bids/${bidId}/acknowledge`, S, { role: 'supplier' });
   const orderPayload = await orderEvt;
-  const orderId = ack.order?.id ?? orderPayload?.orderId;
+  // Optional ack timestamps only — order already exists on accept.
+  await api('POST', `/bids/${bidId}/acknowledge`, C, { role: 'consumer' });
+  const ack = await api('POST', `/bids/${bidId}/acknowledge`, S, { role: 'supplier' });
+  const orderId = acceptRes.order?.id ?? acceptRes.orderId ?? ack.order?.id ?? orderPayload?.orderId;
   if (!orderId) fail('order.created', 'missing order id');
   if (orderPayload?.orderId && orderPayload.orderId !== orderId) {
     fail('order.created', `payload orderId mismatch ${orderPayload.orderId} vs ${orderId}`);
   }
   pass('order.created', orderId);
 
-  const threadId = ack.order?.chatThread?.id;
-  if (!threadId) fail('chat thread', 'missing after dual ack');
+  // Prefer order detail for chat thread (accept payload may omit nested include)
+  let threadId = acceptRes.order?.chatThread?.id ?? ack.order?.chatThread?.id;
+  if (!threadId) {
+    const orderDetail = await api('GET', `/orders/${orderId}`, S);
+    threadId = orderDetail.order?.chatThread?.id ?? orderDetail.chatThread?.id;
+  }
+  if (!threadId) fail('chat thread', 'missing after accept');
   joinRoom(`tracking:${orderId}`);
   joinRoom(`chat:${threadId}`);
   await new Promise((r) => setTimeout(r, 300));

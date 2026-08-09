@@ -7,6 +7,12 @@ function orderCode() {
   return `ORD-${Date.now().toString().slice(-8)}`;
 }
 
+const orderInclude = {
+  chatThread: true,
+  offlinePayment: true,
+  digitalChallan: true,
+} as const;
+
 export async function createOrderFromAcceptedBid(bidId: string) {
   const bid = assertFound(
     await prisma.bid.findUnique({
@@ -23,71 +29,105 @@ export async function createOrderFromAcceptedBid(bidId: string) {
     throw new AppError(400, 'ACK_REQUIRED', 'Consumer must accept the bid first');
   }
 
-  const existing = await prisma.order.findUnique({ where: { bidId } });
+  // Race-safe: another accept concurrent path may already have inserted.
+  const existing = await prisma.order.findUnique({
+    where: { bidId },
+    include: orderInclude,
+  });
   if (existing) return existing;
+
+  const byRequest = await prisma.order.findUnique({
+    where: { bidRequestId: bid.bidRequestId },
+    include: orderInclude,
+  });
+  if (byRequest) return byRequest;
 
   const slaDeadlineAt = new Date(Date.now() + config.slaHours * 3600 * 1000);
   const consumer = bid.bidRequest.consumer;
 
-  const order = await prisma.$transaction(async (tx) => {
-    const created = await tx.order.create({
-      data: {
-        orderCode: orderCode(),
-        bidRequestId: bid.bidRequestId,
-        bidId: bid.id,
-        consumerUserId: consumer.userId,
-        supplierUserId: bid.supplier.userId,
-        status: 'bid_accepted',
-        slaDeadlineAt,
-        slaStatus: 'on_track',
-        deliveryLat: bid.bidRequest.lat ?? consumer.lat ?? undefined,
-        deliveryLng: bid.bidRequest.lng ?? consumer.lng ?? undefined,
-        deliveryAddress:
-          bid.bidRequest.deliveryAddress ?? consumer.addressLine ?? null,
-        consumerAckAt: bid.consumerAckAt,
-        supplierAckAt: bid.supplierAckAt,
-        statusEvents: {
-          create: {
-            status: 'bid_accepted',
-            note: bid.supplierAckAt ? 'Order confirmed by both parties' : 'Won bid — order opened',
+  try {
+    const order = await prisma.$transaction(async (tx) => {
+      const again = await tx.order.findUnique({
+        where: { bidId },
+        include: orderInclude,
+      });
+      if (again) return again;
+
+      return tx.order.create({
+        data: {
+          orderCode: orderCode(),
+          bidRequestId: bid.bidRequestId,
+          bidId: bid.id,
+          consumerUserId: consumer.userId,
+          supplierUserId: bid.supplier.userId,
+          status: 'bid_accepted',
+          slaDeadlineAt,
+          slaStatus: 'on_track',
+          deliveryLat: bid.bidRequest.lat ?? consumer.lat ?? undefined,
+          deliveryLng: bid.bidRequest.lng ?? consumer.lng ?? undefined,
+          deliveryAddress:
+            bid.bidRequest.deliveryAddress ?? consumer.addressLine ?? null,
+          consumerAckAt: bid.consumerAckAt,
+          supplierAckAt: bid.supplierAckAt,
+          statusEvents: {
+            create: {
+              status: 'bid_accepted',
+              note: bid.supplierAckAt
+                ? 'Order confirmed by both parties'
+                : 'Won bid — order opened (bind-on-accept)',
+            },
+          },
+          offlinePayment: { create: { status: 'not_started' } },
+          chatThread: {
+            create: {
+              consumerUserId: consumer.userId,
+              supplierUserId: bid.supplier.userId,
+            },
+          },
+          digitalChallan: {
+            create: {
+              isDraft: true,
+              lineSnapshotJson: bid.bidRequest.items.map((i, idx, arr) => ({
+                name: i.name,
+                quantity: i.quantity,
+                unit: i.unit,
+                productCategory: i.productCategory,
+                grade: bid.grade,
+                rslDaysAtDelivery: bid.rslDaysAtDelivery,
+                amountPaise: idx === 0 ? bid.amountPaise : 0,
+                lineTotalPaise: idx === 0 ? bid.amountPaise : 0,
+                isWinningBidTotal: idx === 0,
+                itemCount: arr.length,
+              })),
+            },
           },
         },
-        offlinePayment: { create: { status: 'not_started' } },
-        chatThread: {
-          create: {
-            consumerUserId: consumer.userId,
-            supplierUserId: bid.supplier.userId,
-          },
-        },
-        digitalChallan: {
-          create: {
-            isDraft: true,
-            lineSnapshotJson: bid.bidRequest.items.map((i, idx, arr) => ({
-              name: i.name,
-              quantity: i.quantity,
-              unit: i.unit,
-              productCategory: i.productCategory,
-              grade: bid.grade,
-              rslDaysAtDelivery: bid.rslDaysAtDelivery,
-              // Full winning bid amount on first line; UI also uses order.totalPaise.
-              amountPaise: idx === 0 ? bid.amountPaise : 0,
-              lineTotalPaise: idx === 0 ? bid.amountPaise : 0,
-              isWinningBidTotal: idx === 0,
-              itemCount: arr.length,
-            })),
-          },
-        },
-      },
-      include: { chatThread: true, offlinePayment: true, digitalChallan: true },
+        include: orderInclude,
+      });
     });
-    return created;
-  });
 
-  if (order.chatThread) {
-    emitChat(order.chatThread.id, 'chat.thread_created', { threadId: order.chatThread.id, orderId: order.id });
+    if (order.chatThread) {
+      emitChat(order.chatThread.id, 'chat.thread_created', {
+        threadId: order.chatThread.id,
+        orderId: order.id,
+      });
+    }
+
+    return order;
+  } catch (e: unknown) {
+    // Unique violation on bidId / bidRequestId under concurrent accept
+    const code = (e as { code?: string })?.code;
+    if (code === 'P2002') {
+      const recovered =
+        (await prisma.order.findUnique({ where: { bidId }, include: orderInclude })) ??
+        (await prisma.order.findUnique({
+          where: { bidRequestId: bid.bidRequestId },
+          include: orderInclude,
+        }));
+      if (recovered) return recovered;
+    }
+    throw e;
   }
-
-  return order;
 }
 
 export async function updateSupplierPerformanceOnDelivery(supplierUserId: string, onTime: boolean) {

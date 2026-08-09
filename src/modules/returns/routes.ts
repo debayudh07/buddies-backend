@@ -229,27 +229,20 @@ returnsRouter.post('/return-claims/:id/submit', authenticate, requireRole('consu
     throw new AppError(400, 'EVIDENCE_REQUIRED', 'Upload photo/video evidence first');
   }
 
-  // Simple auto-approve heuristic: reason codes that clearly implicate supplier
-  const autoCodes = new Set(['thawed', 'cold_chain_break', 'expired', 'wrong_item', 'pest', 'leakage']);
-  const auto = autoCodes.has(claim.reasonCode);
-
+  // All submitted claims go to the supplier for review (no auto-approve).
   const updated = await prisma.returnClaim.update({
     where: { id: claim.id },
     data: {
-      status: auto ? 'auto_approved' : 'supplier_review',
+      status: 'supplier_review',
       submittedAt: new Date(),
-      decidedAt: auto ? new Date() : undefined,
-      feeAllocation: auto ? 'supplier_bears_reverse' : 'none',
-      mediatorNotes: auto ? 'Auto-approved: clear supplier fault signals' : undefined,
+      feeAllocation: 'none',
       windowDeadline: deadline,
     },
   });
 
-  if (auto) await bumpReturnRate(claim.supplierUserId, true);
-
   await sendPush({
     userId: claim.supplierUserId,
-    title: auto ? 'Return auto-approved' : 'Return claim for review',
+    title: 'Return claim for review',
     body: claim.reasonCode,
     data: { claimId: claim.id },
   });

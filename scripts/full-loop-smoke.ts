@@ -242,16 +242,20 @@ async function main() {
   if (!bidId) throw new Error('No bid.id');
   await api('list bids', 'GET', `/consumer/bid-requests/${bidRequestId}/bids`, C);
 
-  // 6–7. Accept + dual ack → order
-  log('\n6–7. Accept + dual ack → order');
-  await api('accept bid', 'POST', `/consumer/bids/${bidId}/accept`, C);
-  await api('consumer ack', 'POST', `/bids/${bidId}/acknowledge`, C, { role: 'consumer' });
-  const ack2 = await api('supplier ack', 'POST', `/bids/${bidId}/acknowledge`, S, {
+  // 6–7. Accept bid (bind-on-accept creates order immediately)
+  log('\n6–7. Accept bid → order (bind-on-accept)');
+  const acceptRes = await api('accept bid', 'POST', `/consumer/bids/${bidId}/accept`, C);
+  let orderId = acceptRes.order?.id ?? acceptRes.orderId;
+  // Optional party confirms (never required to open the order)
+  await api('consumer ack (optional)', 'POST', `/bids/${bidId}/acknowledge`, C, {
+    role: 'consumer',
+  });
+  const ack2 = await api('supplier ack (optional)', 'POST', `/bids/${bidId}/acknowledge`, S, {
     role: 'supplier',
   });
-  const orderId = ack2.order?.id ?? ack2.id;
-  if (!orderId) throw new Error('No order.id after dual ack');
-  log(`  → order ${orderId} (${ack2.order?.orderCode ?? ''})`);
+  orderId = orderId ?? ack2.order?.id ?? ack2.id;
+  if (!orderId) throw new Error('No order.id after accept');
+  log(`  → order ${orderId} (${acceptRes.order?.orderCode ?? ack2.order?.orderCode ?? ''})`);
 
   const orderDetail = await api('get order', 'GET', `/orders/${orderId}`, S);
   const order = orderDetail.order ?? orderDetail;

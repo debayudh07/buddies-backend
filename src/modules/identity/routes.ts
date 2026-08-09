@@ -225,11 +225,12 @@ identityRouter.post(
 );
 
 const addressSchema = z.object({
-  label: z.string(),
-  line: z.string(),
+  label: z.string().min(1),
+  line: z.string().min(1),
   city: z.string().optional(),
-  lat: z.number().optional(),
-  lng: z.number().optional(),
+  // Coerce so JSON integers from some clients still pass.
+  lat: z.coerce.number().optional(),
+  lng: z.coerce.number().optional(),
   isDefault: z.boolean().optional(),
 });
 
@@ -250,14 +251,35 @@ async function mirrorAddressToProfile(
   });
 }
 
+/**
+ * Saved addresses require a ConsumerProfile row. New accounts often open the
+ * addresses sheet before PUT /consumer/profile — same as RFQ create, auto-seed
+ * a minimal profile instead of NO_PROFILE 400.
+ */
+async function getOrCreateConsumerProfile(userId: string) {
+  const existing = await prisma.consumerProfile.findUnique({ where: { userId } });
+  if (existing) return existing;
+  return prisma.consumerProfile.create({
+    data: { userId, restaurantName: 'Restaurant' },
+  });
+}
+
+identityRouter.get('/consumer/addresses', authenticate, requireRole('consumer'), async (req, res) => {
+  const consumer = await getOrCreateConsumerProfile(req.user!.id);
+  const addresses = await prisma.address.findMany({
+    where: { consumerId: consumer.id },
+    orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+  });
+  res.json({ addresses });
+});
+
 identityRouter.post(
   '/consumer/addresses',
   authenticate,
   requireRole('consumer'),
   validateBody(addressSchema),
   async (req, res) => {
-    const consumer = await prisma.consumerProfile.findUnique({ where: { userId: req.user!.id } });
-    if (!consumer) throw new AppError(400, 'NO_PROFILE', 'Create consumer profile first');
+    const consumer = await getOrCreateConsumerProfile(req.user!.id);
 
     const existingCount = await prisma.address.count({ where: { consumerId: consumer.id } });
     const body = req.body as z.infer<typeof addressSchema>;
@@ -281,13 +303,96 @@ identityRouter.post(
   },
 );
 
+const addressUpdateSchema = addressSchema.partial();
+
+identityRouter.patch(
+  '/consumer/addresses/:id',
+  authenticate,
+  requireRole('consumer'),
+  validateBody(addressUpdateSchema),
+  async (req, res) => {
+    const consumer = await getOrCreateConsumerProfile(req.user!.id);
+
+    const addressId = requireParam(req, 'id');
+    const existing = await prisma.address.findUnique({ where: { id: addressId } });
+    if (!existing || existing.consumerId !== consumer.id) {
+      throw new AppError(404, 'NOT_FOUND', 'Address not found');
+    }
+
+    const body = req.body as z.infer<typeof addressUpdateSchema>;
+    const makeDefault = body.isDefault === true;
+
+    const address = await prisma.$transaction(async (tx) => {
+      if (makeDefault) {
+        await tx.address.updateMany({
+          where: { consumerId: consumer.id },
+          data: { isDefault: false },
+        });
+      }
+      return tx.address.update({
+        where: { id: addressId },
+        data: {
+          ...body,
+          ...(makeDefault ? { isDefault: true } : {}),
+        },
+      });
+    });
+
+    if (address.isDefault) await mirrorAddressToProfile(consumer.id, address);
+
+    res.json({ address });
+  },
+);
+
+identityRouter.delete(
+  '/consumer/addresses/:id',
+  authenticate,
+  requireRole('consumer'),
+  async (req, res) => {
+    const consumer = await getOrCreateConsumerProfile(req.user!.id);
+
+    const addressId = requireParam(req, 'id');
+    const existing = await prisma.address.findUnique({ where: { id: addressId } });
+    if (!existing || existing.consumerId !== consumer.id) {
+      throw new AppError(404, 'NOT_FOUND', 'Address not found');
+    }
+
+    await prisma.address.delete({ where: { id: addressId } });
+
+    if (existing.isDefault) {
+      const nextDefault = await prisma.address.findFirst({
+        where: { consumerId: consumer.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (nextDefault) {
+        await prisma.address.update({
+          where: { id: nextDefault.id },
+          data: { isDefault: true },
+        });
+        await mirrorAddressToProfile(consumer.id, nextDefault);
+      } else {
+        await prisma.consumerProfile.update({
+          where: { id: consumer.id },
+          data: {
+            addressLine: null,
+            city: null,
+            lat: null,
+            lng: null,
+          },
+        });
+      }
+    }
+
+    res.json({ deleted: true, id: addressId });
+  },
+);
+
 identityRouter.post(
   '/consumer/addresses/:id/default',
   authenticate,
   requireRole('consumer'),
   async (req, res) => {
-    const consumer = await prisma.consumerProfile.findUnique({ where: { userId: req.user!.id } });
-    if (!consumer) throw new AppError(400, 'NO_PROFILE', 'Create consumer profile first');
+    const consumer = await getOrCreateConsumerProfile(req.user!.id);
 
     const addressId = requireParam(req, 'id');
     const address = await prisma.address.findUnique({ where: { id: addressId } });

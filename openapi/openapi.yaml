@@ -145,7 +145,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: Accepted; dual ack required next }
+        '200': { description: Accepted bind-on-accept; order + chat created immediately }
   /bids/{id}/acknowledge:
     post:
       tags: [shared]
@@ -159,7 +159,10 @@ paths:
               properties:
                 role: { type: string, enum: [consumer, supplier] }
       responses:
-        '200': { description: Ack; creates order when both done }
+        '200':
+          description: >
+            Optional timestamp only. Order already exists after consumer accept;
+            supplier ack never blocks preparing/delivery.
   /supplier/kyc:
     get:
       tags: [supplier]

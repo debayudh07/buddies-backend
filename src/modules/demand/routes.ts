@@ -191,6 +191,7 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
     await prisma.bidRequest.findUnique({
       where: { id: requireParam(req, 'id') },
       include: {
+        consumer: { select: { userId: true } },
         items: true,
         bids: {
           where: { status: { in: ['active', 'accepted'] } },
@@ -215,14 +216,15 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
     }),
   );
 
-  // Mask: never expose consumer private address on this payload for suppliers
-  const publicView = {
-    ...bidRequest,
-    consumerId: undefined,
-    consumerMasked: true,
-  };
+  const isOwner = bidRequest.consumer.userId === req.user!.id;
+  const isAdmin = req.user!.role === 'admin';
+  if (!isOwner && !isAdmin) {
+    // Suppliers browse bidzone feed instead — this path is consumer-owned private data.
+    throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
+  }
 
-  res.json({ bidRequest: publicView });
+  const { consumer: _c, ...rest } = bidRequest;
+  res.json({ bidRequest: rest });
 });
 
 demandRouter.post(
