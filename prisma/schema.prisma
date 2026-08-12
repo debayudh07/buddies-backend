@@ -37,6 +37,12 @@ enum BidRequestStatus {
   threshold_met
 }
 
+enum BidRequestItemStatus {
+  open
+  awarded
+  cancelled
+}
+
 enum BidStatus {
   active
   withdrawn
@@ -136,6 +142,8 @@ model ConsumerProfile {
   lat            Float?
   lng            Float?
   trustScore     Float    @default(100)
+  rating         Float    @default(5)
+  ratingCount    Int      @default(0)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -172,6 +180,7 @@ model SupplierProfile {
   lng                Float?
   kycStatus          KycStatus @default(draft)
   rating             Float     @default(5)
+  ratingCount        Int       @default(0)
   onTimeRate         Float     @default(100)
   returnRate         Float     @default(0)
   challanAdjustRate  Float     @default(0)
@@ -222,7 +231,7 @@ model BidRequest {
   consumer ConsumerProfile  @relation(fields: [consumerId], references: [id])
   items    BidRequestItem[]
   bids     Bid[]
-  order    Order?
+  orders   Order[]
   standing StandingRfq?
 
   @@index([status, liveEndsAt])
@@ -230,40 +239,64 @@ model BidRequest {
 }
 
 model BidRequestItem {
-  id              String  @id @default(uuid())
+  id              String                 @id @default(uuid())
   bidRequestId    String
   name            String
   quantity        Float
   unit            String
   productCategory String?
   gradeHint       String?
+  status          BidRequestItemStatus   @default(open)
 
-  bidRequest BidRequest @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+  bidRequest BidRequest    @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+  bidLines   BidLineItem[]
+}
+
+model BidLineItem {
+  id               String   @id @default(uuid())
+  bidId            String
+  bidRequestItemId String
+  /// Price for this specific item (total for the requested quantity)
+  amountPaise      Int
+  notes            String?
+  createdAt        DateTime @default(now())
+
+  bid            Bid            @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  bidRequestItem BidRequestItem @relation(fields: [bidRequestItemId], references: [id], onDelete: Cascade)
+
+  @@unique([bidId, bidRequestItemId])
+  @@index([bidRequestItemId])
 }
 
 model Bid {
-  id              String    @id @default(uuid())
-  bidRequestId    String
-  supplierId      String
-  amountPaise     Int
-  grade           String
-  shelfLifeDays   Int
+  id                String    @id @default(uuid())
+  bidRequestId      String
+  supplierId        String
+  /// Total amount across all covered items (sum of bidLines or whole-basket if no lines)
+  amountPaise       Int
+  grade             String
+  shelfLifeDays     Int
   rslDaysAtDelivery Int
-  notes           String?
-  status          BidStatus @default(active)
-  score           Float     @default(0)
-  scoreBreakdown  Json?
-  distanceKm      Float?
-  consumerAckAt   DateTime?
-  supplierAckAt   DateTime?
-  acceptedAt      DateTime?
-  expiresAt       DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  notes             String?
+  status            BidStatus @default(active)
+  score             Float     @default(0)
+  scoreBreakdown    Json?
+  distanceKm        Float?
+  consumerAckAt     DateTime?
+  supplierAckAt     DateTime?
+  acceptedAt        DateTime?
+  expiresAt         DateTime?
+  /// IDs of BidRequestItems this bid covers. Empty = full-basket (legacy)
+  coveredItemIds    String[]  @default([])
+  /// true = supplier chose a subset of items; false = full basket bid
+  isPartial         Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   bidRequest BidRequest      @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
   supplier   SupplierProfile @relation(fields: [supplierId], references: [id])
   order      Order?
+  bidLines   BidLineItem[]
 
   @@index([bidRequestId, status])
   @@index([supplierId, status])
@@ -272,7 +305,8 @@ model Bid {
 model Order {
   id                String      @id @default(uuid())
   orderCode         String      @unique
-  bidRequestId      String      @unique
+  /// NOT unique — a single BidRequest can spawn multiple Orders (one per accepted partial bid)
+  bidRequestId      String
   bidId             String      @unique
   consumerUserId    String
   supplierUserId    String
@@ -286,6 +320,8 @@ model Order {
   consumerAckAt     DateTime?
   supplierAckAt     DateTime?
   deliveredAt       DateTime?
+  /// Snapshot of covered item IDs at order creation (from bid.coveredItemIds)
+  coveredItemIds    String[]    @default([])
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -299,7 +335,9 @@ model Order {
   trackingPoints  TrackingPoint[]
   returnClaims    ReturnClaim[]
   statusEvents    OrderStatusEvent[]
+  ratings         OrderRating[]
 
+  @@index([bidRequestId])
   @@index([consumerUserId, createdAt])
   @@index([supplierUserId, createdAt])
   @@index([status])
@@ -313,6 +351,26 @@ model OrderStatusEvent {
   createdAt DateTime    @default(now())
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+/** One optional mutual rating per party per closed order. */
+model OrderRating {
+  id         String   @id @default(uuid())
+  orderId    String
+  fromUserId String
+  toUserId   String
+  /// consumer | supplier — role of the rater
+  fromRole   String
+  stars      Int
+  comment    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, fromUserId])
+  @@index([toUserId, createdAt])
+  @@index([orderId])
 }
 
 model OfflinePayment {

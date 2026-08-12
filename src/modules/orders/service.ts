@@ -20,6 +20,7 @@ export async function createOrderFromAcceptedBid(bidId: string) {
       include: {
         bidRequest: { include: { consumer: true, items: true } },
         supplier: true,
+        bidLines: true,
       },
     }),
   );
@@ -36,12 +37,6 @@ export async function createOrderFromAcceptedBid(bidId: string) {
   });
   if (existing) return existing;
 
-  const byRequest = await prisma.order.findUnique({
-    where: { bidRequestId: bid.bidRequestId },
-    include: orderInclude,
-  });
-  if (byRequest) return byRequest;
-
   const slaDeadlineAt = new Date(Date.now() + config.slaHours * 3600 * 1000);
   const consumer = bid.bidRequest.consumer;
 
@@ -52,6 +47,10 @@ export async function createOrderFromAcceptedBid(bidId: string) {
         include: orderInclude,
       });
       if (again) return again;
+
+      const coveredItems = bid.coveredItemIds.length > 0
+        ? bid.bidRequest.items.filter((i) => bid.coveredItemIds.includes(i.id))
+        : bid.bidRequest.items;
 
       return tx.order.create({
         data: {
@@ -67,6 +66,7 @@ export async function createOrderFromAcceptedBid(bidId: string) {
           deliveryLng: bid.bidRequest.lng ?? consumer.lng ?? undefined,
           deliveryAddress:
             bid.bidRequest.deliveryAddress ?? consumer.addressLine ?? null,
+          coveredItemIds: bid.coveredItemIds.length > 0 ? bid.coveredItemIds : bid.bidRequest.items.map((i) => i.id),
           consumerAckAt: bid.consumerAckAt,
           supplierAckAt: bid.supplierAckAt,
           statusEvents: {
@@ -87,18 +87,22 @@ export async function createOrderFromAcceptedBid(bidId: string) {
           digitalChallan: {
             create: {
               isDraft: true,
-              lineSnapshotJson: bid.bidRequest.items.map((i, idx, arr) => ({
-                name: i.name,
-                quantity: i.quantity,
-                unit: i.unit,
-                productCategory: i.productCategory,
-                grade: bid.grade,
-                rslDaysAtDelivery: bid.rslDaysAtDelivery,
-                amountPaise: idx === 0 ? bid.amountPaise : 0,
-                lineTotalPaise: idx === 0 ? bid.amountPaise : 0,
-                isWinningBidTotal: idx === 0,
-                itemCount: arr.length,
-              })),
+              lineSnapshotJson: coveredItems.map((i, idx, arr) => {
+                const line = bid.bidLines?.find((l) => l.bidRequestItemId === i.id);
+                const amount = line ? line.amountPaise : (bid.coveredItemIds.length > 0 ? 0 : (idx === 0 ? bid.amountPaise : 0));
+                return {
+                  name: i.name,
+                  quantity: i.quantity,
+                  unit: i.unit,
+                  productCategory: i.productCategory,
+                  grade: bid.grade,
+                  rslDaysAtDelivery: bid.rslDaysAtDelivery,
+                  amountPaise: amount,
+                  lineTotalPaise: amount,
+                  isWinningBidTotal: line ? true : idx === 0,
+                  itemCount: arr.length,
+                };
+              }),
             },
           },
         },
@@ -115,15 +119,10 @@ export async function createOrderFromAcceptedBid(bidId: string) {
 
     return order;
   } catch (e: unknown) {
-    // Unique violation on bidId / bidRequestId under concurrent accept
+    // Unique violation on bidId under concurrent accept
     const code = (e as { code?: string })?.code;
     if (code === 'P2002') {
-      const recovered =
-        (await prisma.order.findUnique({ where: { bidId }, include: orderInclude })) ??
-        (await prisma.order.findUnique({
-          where: { bidRequestId: bid.bidRequestId },
-          include: orderInclude,
-        }));
+      const recovered = await prisma.order.findUnique({ where: { bidId }, include: orderInclude });
       if (recovered) return recovered;
     }
     throw e;

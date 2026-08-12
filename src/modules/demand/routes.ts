@@ -320,10 +320,35 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
 
   const { consumer: _c, ...rest } = bidRequest;
   const now = new Date();
+  
+  // Find all accepted bids for this bidRequest
+  const acceptedBids = await prisma.bid.findMany({
+    where: {
+      bidRequestId: bidRequest.id,
+      status: 'accepted',
+    },
+    select: { id: true, coveredItemIds: true },
+  });
+
+  const itemsStatus = bidRequest.items.map((i) => {
+    const winners = acceptedBids.filter((b) => 
+      b.coveredItemIds.length === 0 || b.coveredItemIds.includes(i.id)
+    );
+    return {
+      id: i.id,
+      name: i.name,
+      quantity: i.quantity,
+      unit: i.unit,
+      status: i.status,
+      winnerCount: winners.length,
+    };
+  });
+
   const itemsPolicy = itemsEditPolicy(bidRequest.createdAt, now);
   res.json({
     bidRequest: {
       ...rest,
+      itemsStatus,
       editPolicy: {
         canEditMeta: canEditMeta(bidRequest.status, bidRequest.liveEndsAt, now),
         ...itemsPolicy,

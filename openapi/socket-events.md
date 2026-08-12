@@ -20,5 +20,6 @@
 | `order.status_changed` | `tracking:{orderId}` | `{ orderId, status, paymentStatus?, reason?, at }` |
 | `order.updated` | `tracking:{orderId}`, `user:{userId}` | same payload — preference for list + detail quiet reloads |
 | `tracking.location_updated` | `tracking:{orderId}` | `{ point, etaMinutes }` |
+| (ratings) | via `order.updated` reason=`rating_submitted` | After optional mutual star rating on closed order |
 | `chat.thread_created` | `chat:{threadId}` | `{ threadId, orderId }` |
 | `chat.message_created` | `chat:{threadId}` | `{ message }` |

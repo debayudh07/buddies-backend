@@ -166,7 +166,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
   // Browse is open to all suppliers; placing a bid still requires verified KYC.
   const profile = await prisma.supplierProfile.findUnique({
     where: { userId: req.user!.id },
-    select: { id: true, lat: true, lng: true, kycStatus: true },
+    select: { id: true, lat: true, lng: true, kycStatus: true, categories: true },
   });
   const [bidCap, activeBidCount] = await Promise.all([
     getSupplierBidCap(req.user!.id),
@@ -245,17 +245,23 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       used: activeBidCount,
       remaining,
     },
+    categories: profile?.categories ?? [],
   });
 });
 
 const placeBidSchema = z.object({
   bidRequestId: z.string().min(1),
-  amountPaise: z.coerce.number().int().positive(),
+  amountPaise: z.coerce.number().int().positive().optional(),
   grade: z.string().min(1).default('A'),
   // Defaults keep older clients working; supplier UI should still send category-aware values.
   shelfLifeDays: z.coerce.number().int().positive().default(5),
   rslDaysAtDelivery: z.coerce.number().int().nonnegative().default(2),
   notes: z.string().optional(),
+  lines: z.array(z.object({
+    bidRequestItemId: z.string().min(1),
+    amountPaise: z.coerce.number().int().positive(),
+    notes: z.string().optional(),
+  })).optional(),
 });
 
 bidzoneRouter.post(
@@ -309,25 +315,85 @@ bidzoneRouter.post(
       );
     }
 
-    const best = await prisma.bid.findFirst({
-      where: { bidRequestId: bidRequest.id, ...activeUnexpiredWhere() },
-      orderBy: { amountPaise: 'asc' },
-    });
+    const lines = body.lines || [];
+    const isPartial = lines.length > 0;
+
+    if (!body.amountPaise && !isPartial) {
+      throw new AppError(400, 'AMOUNT_OR_LINES_REQUIRED', 'Either amountPaise or per-item lines must be provided');
+    }
+
+    const bidAmountPaise = isPartial
+      ? lines.reduce((sum, l) => sum + l.amountPaise, 0)
+      : body.amountPaise!;
+    const coveredItemIds = isPartial
+      ? lines.map((l) => l.bidRequestItemId)
+      : [];
+
     const minDecrementPaise = config.auction.minDecrementPaise;
-    if (best && body.amountPaise > best.amountPaise - minDecrementPaise) {
-      // First bid is free; later bids (from others) must undercut by min decrement.
-      // Same supplier may update their own leading bid freely.
-      if (best.supplierId !== profile.id) {
-        const maxPaise = best.amountPaise - minDecrementPaise;
-        const maxRupees = (maxPaise / 100).toFixed(0);
-        const bestRupees = (best.amountPaise / 100).toFixed(0);
-        const cutRupees = (minDecrementPaise / 100).toFixed(0);
-        throw new AppError(
-          400,
-          'MIN_DECREMENT',
-          `Bid at most ₹${maxRupees} — current best is ₹${bestRupees} (min undercut ₹${cutRupees})`,
-        );
+
+    if (isPartial) {
+      const reqItemIds = bidRequest.items.map((i) => i.id);
+      for (const line of lines) {
+        if (!reqItemIds.includes(line.bidRequestItemId)) {
+          throw new AppError(400, 'INVALID_ITEM_ID', `Item ${line.bidRequestItemId} is not in the bid request`);
+        }
       }
+
+      for (const line of lines) {
+        const bestLine = await prisma.bidLineItem.findFirst({
+          where: {
+            bidRequestItemId: line.bidRequestItemId,
+            bid: activeUnexpiredWhere(),
+          },
+          orderBy: { amountPaise: 'asc' },
+          include: { bid: true },
+        });
+
+        if (bestLine && line.amountPaise > bestLine.amountPaise - minDecrementPaise) {
+          if (bestLine.bid.supplierId !== profile.id) {
+            const maxPaise = bestLine.amountPaise - minDecrementPaise;
+            const maxRupees = (maxPaise / 100).toFixed(0);
+            const bestRupees = (bestLine.amountPaise / 100).toFixed(0);
+            const cutRupees = (minDecrementPaise / 100).toFixed(0);
+            const itemName = bidRequest.items.find((i) => i.id === line.bidRequestItemId)?.name || 'Item';
+            throw new AppError(
+              400,
+              'MIN_DECREMENT',
+              `Bid at most ₹${maxRupees} for ${itemName} — current best is ₹${bestRupees} (min undercut ₹${cutRupees})`,
+            );
+          }
+        }
+      }
+    } else {
+      const best = await prisma.bid.findFirst({
+        where: { bidRequestId: bidRequest.id, ...activeUnexpiredWhere() },
+        orderBy: { amountPaise: 'asc' },
+      });
+      if (best && bidAmountPaise > best.amountPaise - minDecrementPaise) {
+        if (best.supplierId !== profile.id) {
+          const maxPaise = best.amountPaise - minDecrementPaise;
+          const maxRupees = (maxPaise / 100).toFixed(0);
+          const bestRupees = (best.amountPaise / 100).toFixed(0);
+          const cutRupees = (minDecrementPaise / 100).toFixed(0);
+          throw new AppError(
+            400,
+            'MIN_DECREMENT',
+            `Bid at most ₹${maxRupees} — current best is ₹${bestRupees} (min undercut ₹${cutRupees})`,
+          );
+        }
+      }
+    }
+
+    let proRatedBudgetPaise = bidRequest.budgetPaise;
+    if (isPartial && bidRequest.budgetPaise != null) {
+      const totalQty = bidRequest.items.reduce((sum, i) => sum + i.quantity, 0);
+      const coveredQty = bidRequest.items
+        .filter((i) => coveredItemIds.includes(i.id))
+        .reduce((sum, i) => sum + i.quantity, 0);
+      
+      proRatedBudgetPaise = totalQty > 0
+        ? Math.round((bidRequest.budgetPaise * coveredQty) / totalQty)
+        : 0;
     }
 
     let distanceKm = 5;
@@ -336,8 +402,8 @@ bidzoneRouter.post(
     }
 
     const { score, breakdown } = computeBidScore({
-      amountPaise: body.amountPaise,
-      budgetPaise: bidRequest.budgetPaise,
+      amountPaise: bidAmountPaise,
+      budgetPaise: proRatedBudgetPaise,
       rslDays: body.rslDaysAtDelivery,
       minRslDays: rules.minRslDays,
       distanceKm,
@@ -363,25 +429,50 @@ bidzoneRouter.post(
 
     const bidExpiresAt = computeBidExpiresAt(liveEndsAt);
 
-    const bid = await prisma.bid.create({
-      data: {
-        bidRequestId: bidRequest.id,
-        supplierId: profile.id,
-        amountPaise: body.amountPaise,
-        grade: body.grade,
-        shelfLifeDays: body.shelfLifeDays,
-        rslDaysAtDelivery: body.rslDaysAtDelivery,
-        notes: body.notes,
-        score,
-        scoreBreakdown: breakdown,
-        distanceKm,
-        expiresAt: bidExpiresAt,
-      },
-      include: {
-        supplier: {
-          select: { publicLabel: true, rating: true, onTimeRate: true, returnRate: true },
+    const bid = await prisma.$transaction(async (tx) => {
+      const createdBid = await tx.bid.create({
+        data: {
+          bidRequestId: bidRequest.id,
+          supplierId: profile.id,
+          amountPaise: bidAmountPaise,
+          grade: body.grade,
+          shelfLifeDays: body.shelfLifeDays,
+          rslDaysAtDelivery: body.rslDaysAtDelivery,
+          notes: body.notes,
+          score,
+          scoreBreakdown: breakdown,
+          distanceKm,
+          expiresAt: bidExpiresAt,
+          coveredItemIds,
+          isPartial,
         },
-      },
+        include: {
+          supplier: {
+            select: { publicLabel: true, rating: true, onTimeRate: true, returnRate: true },
+          },
+        },
+      });
+
+      if (isPartial) {
+        await tx.bidLineItem.createMany({
+          data: lines.map((l) => ({
+            bidId: createdBid.id,
+            bidRequestItemId: l.bidRequestItemId,
+            amountPaise: l.amountPaise,
+            notes: l.notes || null,
+          })),
+        });
+      }
+
+      return tx.bid.findUniqueOrThrow({
+        where: { id: createdBid.id },
+        include: {
+          supplier: {
+            select: { publicLabel: true, rating: true, onTimeRate: true, returnRate: true },
+          },
+          bidLines: true,
+        },
+      });
     });
 
     emitAuction(bidRequest.id, 'auction.bid_placed', {
@@ -397,7 +488,7 @@ bidzoneRouter.post(
       void sendPush({
         userId: consumer.userId,
         title: 'New bid',
-        body: `${profile.publicLabel} bid ₹${(body.amountPaise / 100).toFixed(0)} (active ${Math.round(config.auction.bidTtlSec / 60)} min)`,
+        body: `${profile.publicLabel} bid ₹${(bidAmountPaise / 100).toFixed(0)} (active ${Math.round(config.auction.bidTtlSec / 60)} min)`,
         data: { bidRequestId: bidRequest.id, bidId: bid.id },
       }).catch(() => undefined);
     }
@@ -617,7 +708,7 @@ bidzoneRouter.get(
     const bidRequest = assertFound(
       await prisma.bidRequest.findUnique({
         where: { id: bidRequestId },
-        include: { consumer: { select: { userId: true } } },
+        include: { consumer: { select: { userId: true } }, items: true },
       }),
     );
     if (bidRequest.consumer.userId !== req.user!.id && req.user!.role !== 'admin') {
@@ -638,14 +729,59 @@ bidzoneRouter.get(
             onTimeRate: true,
             returnRate: true,
             challanAdjustRate: true,
-            // never shopAddressPrivate
           },
         },
         order: { select: { id: true, orderCode: true, status: true } },
+        bidLines: true,
       },
       orderBy: { score: 'desc' },
     });
-    res.json({ bids, bidTtlSec: config.auction.bidTtlSec });
+
+    const itemId = req.query.itemId as string | undefined;
+    const sort = req.query.sort as string | undefined; // price | score | rating | coverage
+    const statusParam = req.query.status as string | undefined; // active | accepted | all
+
+    let filteredBids = bids;
+
+    // 1. Filter by status
+    if (statusParam === 'active') {
+      filteredBids = filteredBids.filter((b) => b.status === 'active' && isBidStillLive(b));
+    } else if (statusParam === 'accepted') {
+      filteredBids = filteredBids.filter((b) => b.status === 'accepted');
+    }
+
+    // 2. Filter by itemId
+    if (itemId) {
+      filteredBids = filteredBids.filter((b) => {
+        if (b.coveredItemIds.length === 0) return true;
+        return b.coveredItemIds.includes(itemId);
+      });
+    }
+
+    // 3. Sort
+    if (sort === 'price') {
+      filteredBids.sort((a, b) => {
+        if (itemId) {
+          const priceA = a.bidLines.find((l) => l.bidRequestItemId === itemId)?.amountPaise ?? a.amountPaise;
+          const priceB = b.bidLines.find((l) => l.bidRequestItemId === itemId)?.amountPaise ?? b.amountPaise;
+          return priceA - priceB;
+        }
+        return a.amountPaise - b.amountPaise;
+      });
+    } else if (sort === 'rating') {
+      filteredBids.sort((a, b) => b.supplier.rating - a.supplier.rating);
+    } else if (sort === 'coverage') {
+      const totalItems = bidRequest.items.length;
+      const getCoverage = (b: typeof bids[number]) => {
+        if (b.coveredItemIds.length === 0) return 1.0;
+        return totalItems > 0 ? b.coveredItemIds.length / totalItems : 0;
+      };
+      filteredBids.sort((a, b) => getCoverage(b) - getCoverage(a));
+    } else {
+      filteredBids.sort((a, b) => b.score - a.score);
+    }
+
+    res.json({ bids: filteredBids, bidTtlSec: config.auction.bidTtlSec });
   },
 );
 
@@ -674,7 +810,7 @@ bidzoneRouter.post(
     }
     if (bid.bidRequest.status !== 'open') throw new AppError(400, 'NOT_OPEN', 'Already awarded');
 
-    // Single transaction: award + reject peers (order create next under race-safe path)
+    // Single transaction: award + reject peers if fully awarded (order create next under race-safe path)
     try {
       await prisma.$transaction(async (tx) => {
         const current = await tx.bidRequest.findUnique({
@@ -686,11 +822,39 @@ bidzoneRouter.post(
         }
         const live = await tx.bid.findUnique({
           where: { id: bid.id },
-          select: { status: true, expiresAt: true },
+          select: { status: true, expiresAt: true, coveredItemIds: true },
         });
         if (!live || !isBidStillLive(live)) {
           throw new AppError(400, 'BID_EXPIRED', 'Bid not active');
         }
+
+        // Fetch items status to verify not already awarded
+        const reqItems = await tx.bidRequestItem.findMany({
+          where: { bidRequestId: bid.bidRequestId },
+        });
+        const coveredIds = live.coveredItemIds.length > 0
+          ? live.coveredItemIds
+          : reqItems.map((i) => i.id);
+
+        const alreadyAwarded = reqItems.filter(
+          (i) => coveredIds.includes(i.id) && i.status === 'awarded'
+        );
+        if (alreadyAwarded.length > 0) {
+          const names = alreadyAwarded.map((i) => i.name).join(', ');
+          throw new AppError(
+            400,
+            'ALREADY_AWARDED',
+            `The following items are already awarded: ${names}`
+          );
+        }
+
+        // Award items
+        await tx.bidRequestItem.updateMany({
+          where: { id: { in: coveredIds } },
+          data: { status: 'awarded' },
+        });
+
+        // Mark bid as accepted
         await tx.bid.update({
           where: { id: bid.id },
           data: {
@@ -699,18 +863,28 @@ bidzoneRouter.post(
             consumerAckAt: new Date(),
           },
         });
-        await tx.bid.updateMany({
-          where: {
-            bidRequestId: bid.bidRequestId,
-            id: { not: bid.id },
-            status: 'active',
-          },
-          data: { status: 'rejected' },
+
+        // Check if all items are now awarded
+        const allItems = await tx.bidRequestItem.findMany({
+          where: { bidRequestId: bid.bidRequestId },
         });
-        await tx.bidRequest.update({
-          where: { id: bid.bidRequestId },
-          data: { status: 'awarded', winningBidId: bid.id },
-        });
+        const allAwarded = allItems.every((i) => i.status === 'awarded');
+
+        if (allAwarded) {
+          await tx.bidRequest.update({
+            where: { id: bid.bidRequestId },
+            data: { status: 'awarded', winningBidId: bid.id },
+          });
+
+          // Reject remaining active bids
+          await tx.bid.updateMany({
+            where: {
+              bidRequestId: bid.bidRequestId,
+              status: 'active',
+            },
+            data: { status: 'rejected' },
+          });
+        }
       });
     } catch (e) {
       if (e instanceof AppError) throw e;

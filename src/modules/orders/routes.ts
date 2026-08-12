@@ -19,6 +19,12 @@ import {
   responseCacheInvalidate,
   responseCacheSet,
 } from '../../lib/response-cache';
+import {
+  consumerPublicRating,
+  ewmaRating,
+  ewmaTrustFromStars,
+  supplierPublicRating,
+} from '../../lib/ratings';
 
 export const ordersRouter = Router();
 
@@ -142,7 +148,10 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
                 id: true,
                 publicLabel: true,
                 rating: true,
+                ratingCount: true,
                 onTimeRate: true,
+                returnRate: true,
+                challanAdjustRate: true,
               },
             },
           },
@@ -185,6 +194,17 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
           orderBy: { createdAt: 'asc' },
           take: 40,
           select: { id: true, status: true, note: true, createdAt: true },
+        },
+        ratings: {
+          select: {
+            id: true,
+            fromUserId: true,
+            toUserId: true,
+            fromRole: true,
+            stars: true,
+            comment: true,
+            createdAt: true,
+          },
         },
       },
     }),
@@ -286,11 +306,93 @@ ordersRouter.get('/orders/:id', authenticate, async (req, res) => {
     return;
   }
   const order = await getOrderForUser(id, req.user!.id, req.user!.role);
-  const payload = { order: presentOrder(order) };
+  const base = presentOrder(order);
+  const enriched = await enrichOrderWithRatings(base, req.user!.id);
+  const payload = { order: enriched };
   responseCacheSet(cacheKey, payload, ORDER_DETAIL_TTL_MS);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);
 });
+
+type RatingRow = {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  fromRole: string;
+  stars: number;
+  comment: string | null;
+  createdAt: Date;
+};
+
+function presentRating(r: RatingRow) {
+  // Stars/comment/role only — no user IDs in client payloads.
+  return {
+    id: r.id,
+    fromRole: r.fromRole,
+    stars: r.stars,
+    comment: r.comment,
+    createdAt: r.createdAt,
+  };
+}
+
+async function enrichOrderWithRatings<
+  T extends {
+    id: string;
+    status: string;
+    consumerUserId: string;
+    supplierUserId: string;
+    ratings?: RatingRow[];
+    bid?: {
+      supplier?: {
+        rating?: number;
+        ratingCount?: number;
+        onTimeRate?: number;
+        returnRate?: number;
+        challanAdjustRate?: number;
+      } | null;
+    } | null;
+  },
+>(order: T, viewerUserId: string) {
+  const ratings = order.ratings ?? [];
+  const my = ratings.find((r) => r.fromUserId === viewerUserId) ?? null;
+  const peer = ratings.find((r) => r.fromUserId !== viewerUserId) ?? null;
+
+  const [supplierProfile, consumerProfile] = await Promise.all([
+    prisma.supplierProfile.findUnique({
+      where: { userId: order.supplierUserId },
+      select: {
+        rating: true,
+        ratingCount: true,
+        onTimeRate: true,
+        returnRate: true,
+        challanAdjustRate: true,
+      },
+    }),
+    prisma.consumerProfile.findUnique({
+      where: { userId: order.consumerUserId },
+      select: { rating: true, ratingCount: true, trustScore: true },
+    }),
+  ]);
+
+  const supplierPublic = supplierProfile
+    ? supplierPublicRating(supplierProfile)
+    : { displayed: 5, perfStars: 5, avgPeerStars: null, ratingCount: 0 };
+  const consumerPublic = consumerProfile
+    ? consumerPublicRating(consumerProfile)
+    : { displayed: 5, perfStars: 5, avgPeerStars: null, ratingCount: 0 };
+
+  const canRate = order.status === 'closed' && !my;
+
+  const { ratings: _drop, ...rest } = order as T & { ratings?: RatingRow[] };
+  return {
+    ...rest,
+    myRating: my ? presentRating(my) : null,
+    peerRating: peer ? presentRating(peer) : null,
+    canRate,
+    supplierPublicRating: supplierPublic,
+    consumerPublicRating: consumerPublic,
+  };
+}
 
 const statusSchema = z.object({
   status: z.enum(['preparing', 'out_for_delivery', 'arrived']),
@@ -1152,3 +1254,139 @@ ordersRouter.post('/orders/:id/payment/dispute', authenticate, requireRole('supp
   );
   res.json({ payment });
 });
+
+const ratingBodySchema = z.object({
+  stars: z.coerce.number().int().min(1).max(5),
+  comment: z.string().max(500).optional(),
+});
+
+ordersRouter.get('/orders/:id/ratings', authenticate, async (req, res) => {
+  const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, req.user!.role);
+  const ratings = await prisma.orderRating.findMany({
+    where: { orderId: order.id },
+    select: {
+      id: true,
+      fromUserId: true,
+      toUserId: true,
+      fromRole: true,
+      stars: true,
+      comment: true,
+      createdAt: true,
+    },
+  });
+  const my = ratings.find((r) => r.fromUserId === req.user!.id) ?? null;
+  const peer = ratings.find((r) => r.fromUserId !== req.user!.id) ?? null;
+  res.json({
+    ratings: ratings.map(presentRating),
+    myRating: my ? presentRating(my) : null,
+    peerRating: peer ? presentRating(peer) : null,
+    canRate: order.status === 'closed' && !my,
+  });
+});
+
+ordersRouter.post(
+  '/orders/:id/ratings',
+  authenticate,
+  validateBody(ratingBodySchema),
+  async (req, res) => {
+    const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, req.user!.role);
+    if (order.status !== 'closed') {
+      throw new AppError(
+        400,
+        'NOT_CLOSED',
+        'Ratings unlock only after the order is closed (payment confirmed)',
+      );
+    }
+
+    const isConsumer = order.consumerUserId === req.user!.id;
+    const isSupplier = order.supplierUserId === req.user!.id;
+    if (!isConsumer && !isSupplier) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your order');
+    }
+
+    const fromRole = isConsumer ? 'consumer' : 'supplier';
+    const toUserId = isConsumer ? order.supplierUserId : order.consumerUserId;
+    const stars = req.body.stars as number;
+    const comment =
+      typeof req.body.comment === 'string' && req.body.comment.trim()
+        ? req.body.comment.trim().slice(0, 500)
+        : null;
+
+    const existing = await prisma.orderRating.findUnique({
+      where: {
+        orderId_fromUserId: { orderId: order.id, fromUserId: req.user!.id },
+      },
+    });
+    if (existing) {
+      res.json({ rating: presentRating(existing), alreadyApplied: true });
+      return;
+    }
+
+    const rating = await prisma.$transaction(async (tx) => {
+      const created = await tx.orderRating.create({
+        data: {
+          orderId: order.id,
+          fromUserId: req.user!.id,
+          toUserId,
+          fromRole,
+          stars,
+          comment,
+        },
+      });
+
+      if (isConsumer) {
+        const profile = await tx.supplierProfile.findUnique({
+          where: { userId: toUserId },
+        });
+        if (profile) {
+          const nextCount = profile.ratingCount + 1;
+          const nextRating =
+            profile.ratingCount === 0 ? stars : ewmaRating(profile.rating, stars);
+          await tx.supplierProfile.update({
+            where: { id: profile.id },
+            data: { rating: nextRating, ratingCount: nextCount },
+          });
+        }
+      } else {
+        const profile = await tx.consumerProfile.findUnique({
+          where: { userId: toUserId },
+        });
+        if (profile) {
+          const nextCount = profile.ratingCount + 1;
+          const nextRating =
+            profile.ratingCount === 0 ? stars : ewmaRating(profile.rating, stars);
+          const nextTrust = ewmaTrustFromStars(profile.trustScore, stars);
+          await tx.consumerProfile.update({
+            where: { id: profile.id },
+            data: {
+              rating: nextRating,
+              ratingCount: nextCount,
+              trustScore: nextTrust,
+            },
+          });
+        }
+      }
+
+      return created;
+    });
+
+    notifyOrderUpdated(
+      {
+        id: order.id,
+        status: order.status,
+        consumerUserId: order.consumerUserId,
+        supplierUserId: order.supplierUserId,
+      },
+      {
+        reason: 'rating_submitted',
+        push: {
+          userId: toUserId,
+          title: 'New rating',
+          body: `You received a ${stars}-star rating on order ${order.orderCode}`,
+        },
+      },
+    );
+
+    res.status(201).json({ rating: presentRating(rating) });
+  },
+);

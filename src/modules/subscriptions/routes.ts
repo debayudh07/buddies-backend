@@ -13,8 +13,6 @@ import {
 
 export const subscriptionsRouter = Router();
 
-type SubscriptionPlan = 'consumer_standard' | 'supplier_standard' | 'supplier_premium';
-
 subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
   const sub = await getActiveSubscription(req.user!.id);
   const cap =
@@ -36,14 +34,28 @@ subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
     }
   }
 
+  const pricing =
+    req.user!.role === 'supplier'
+      ? {
+          supplier_standard: {
+            inr: 299,
+            introInr: 99,
+            months: 'first 3 months intro',
+            concurrentBids: 5,
+          },
+          supplier_premium: {
+            inr: 599,
+            concurrentBids: SUPPLIER_PREMIUM_BID_CAP,
+          },
+        }
+      : {
+          consumer_standard: { inr: 299, slots: '5 bid slots' },
+        };
+
   res.json({
     subscription: sub,
     quota: { cap, used: activeBids, remaining: Math.max(0, cap - activeBids) },
-    pricing: {
-      consumer_standard: { inr: 299, benefits: '5 bid slots' },
-      supplier_standard: { inr: 299, introInr: 99, months: 'first 3 months intro', concurrentBids: 5 },
-      supplier_premium: { inr: 599, concurrentBids: SUPPLIER_PREMIUM_BID_CAP },
-    },
+    pricing,
   });
 });
 
