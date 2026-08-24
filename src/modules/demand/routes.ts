@@ -11,8 +11,13 @@ import { notifyMany } from '../../lib/notify';
 import {
   categorySlugs,
   normalizeProductCategory,
-  shelfRulesForItems,
 } from '../../lib/product-categories';
+import {
+  assertCartRule,
+  canonicalizeLine,
+  type CanonicalLine,
+  type IncomingCatalogLine,
+} from '../../lib/product-catalog';
 
 const knownCategory = z
   .string()
@@ -29,6 +34,66 @@ const knownCategory = z
     return n;
   });
 
+const catalogItemSchema = z.object({
+  catalogCategory: z.string().min(1).optional(),
+  catalogItemSlug: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  quantity: z.number().positive(),
+  unit: z.string().min(1).optional(),
+  productCategory: knownCategory.optional(),
+  gradeHint: z.string().optional(),
+});
+
+function canonicalizeItems(raw: IncomingCatalogLine[]): CanonicalLine[] {
+  const out: CanonicalLine[] = [];
+  for (const line of raw) {
+    if (!line.catalogCategory || !line.catalogItemSlug) {
+      // Legacy APK path: free-text name + shelf productCategory.
+      if (!line.name || !line.productCategory || !line.unit) {
+        throw new AppError(
+          400,
+          'UNKNOWN_ITEM',
+          'Each line needs catalogCategory and catalogItemSlug (or legacy name, unit, productCategory)',
+        );
+      }
+      out.push({
+        catalogCategory: '',
+        catalogItemSlug: '',
+        name: line.name,
+        quantity: line.quantity,
+        unit: (line.unit as CanonicalLine['unit']) ?? 'kg',
+        productCategory: line.productCategory,
+        minimumOrderQty: 0,
+        minimumOrderUnit: (line.unit as CanonicalLine['unit']) ?? 'kg',
+        gradeHint: line.gradeHint,
+      });
+      continue;
+    }
+    const canonical = canonicalizeLine(line);
+    if ('code' in canonical) {
+      throw new AppError(400, canonical.code, canonical.message);
+    }
+    out.push(canonical);
+  }
+  const cartErr = assertCartRule(out);
+  if (cartErr) throw new AppError(400, cartErr.code, cartErr.message);
+  return out;
+}
+
+function itemCreateData(i: CanonicalLine) {
+  return {
+    name: i.name,
+    quantity: i.quantity,
+    unit: i.unit,
+    productCategory: i.productCategory,
+    gradeHint: i.gradeHint,
+    catalogCategory: i.catalogCategory || null,
+    catalogItemSlug: i.catalogItemSlug || null,
+    minimumOrderQty: i.minimumOrderQty || null,
+    minimumOrderUnit: i.minimumOrderUnit || null,
+  };
+}
+
 const createSchema = z.object({
   budgetPaise: z.number().int().positive().optional(),
   /** Auction length in hours. Use `0` for Instant (30 minutes). */
@@ -38,17 +103,7 @@ const createSchema = z.object({
   addressId: z.string().optional(),
   lat: z.number().optional(),
   lng: z.number().optional(),
-  items: z
-    .array(
-      z.object({
-        name: z.string().min(1),
-        quantity: z.number().positive(),
-        unit: z.string().min(1),
-        productCategory: knownCategory,
-        gradeHint: z.string().optional(),
-      }),
-    )
-    .min(1),
+  items: z.array(catalogItemSchema).min(1),
 });
 
 /** Resolve auction window seconds from stored durationHours (0 = Instant 30 min). */
@@ -66,13 +121,7 @@ function auctionWindowSec(durationHours: number | null | undefined): number {
   );
 }
 
-const itemSchema = z.object({
-  name: z.string().min(1),
-  quantity: z.number().positive(),
-  unit: z.string().min(1),
-  productCategory: knownCategory,
-  gradeHint: z.string().optional(),
-});
+const itemSchema = catalogItemSchema;
 
 const patchSchema = z
   .object({
@@ -146,6 +195,8 @@ demandRouter.post(
       deliveryAddress = [address.line, address.city].filter(Boolean).join(', ') || deliveryAddress;
     }
 
+    const canonicalItems = canonicalizeItems(body.items as IncomingCatalogLine[]);
+
     // Prefer consumer-selected duration; Instant (durationHours=0) = 30 minutes.
     const durationSec = auctionWindowSec(body.durationHours);
     const liveEndsAt = new Date(Date.now() + durationSec * 1000);
@@ -163,13 +214,7 @@ demandRouter.post(
         lat: deliveryLat,
         lng: deliveryLng,
         items: {
-          create: body.items.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            unit: i.unit,
-            productCategory: i.productCategory,
-            gradeHint: i.gradeHint,
-          })),
+          create: canonicalItems.map(itemCreateData),
         },
       },
       include: { items: true },
@@ -227,6 +272,11 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
           quantity: true,
           unit: true,
           productCategory: true,
+          catalogCategory: true,
+          catalogItemSlug: true,
+          minimumOrderQty: true,
+          minimumOrderUnit: true,
+          status: true,
         },
       },
       bids: {
@@ -304,6 +354,7 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
               },
             },
             order: { select: { id: true, orderCode: true, status: true } },
+            bidLines: true,
           },
           orderBy: { score: 'desc' },
         },
@@ -327,13 +378,15 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
       bidRequestId: bidRequest.id,
       status: 'accepted',
     },
-    select: { id: true, coveredItemIds: true },
+    select: { id: true, coveredItemIds: true, bidLines: { select: { bidRequestItemId: true } } },
   });
 
   const itemsStatus = bidRequest.items.map((i) => {
-    const winners = acceptedBids.filter((b) => 
-      b.coveredItemIds.length === 0 || b.coveredItemIds.includes(i.id)
-    );
+    const winners = acceptedBids.filter((b) => {
+      if (i.awardedBidId) return b.id === i.awardedBidId;
+      if (b.bidLines.length > 0) return b.bidLines.some((l) => l.bidRequestItemId === i.id);
+      return b.coveredItemIds.length === 0 || b.coveredItemIds.includes(i.id);
+    });
     return {
       id: i.id,
       name: i.name,
@@ -398,6 +451,10 @@ demandRouter.patch(
       }
     }
 
+    const canonicalItems = body.items
+      ? canonicalizeItems(body.items as IncomingCatalogLine[])
+      : null;
+
     let deliveryLat = bidRequest.lat ?? undefined;
     let deliveryLng = bidRequest.lng ?? undefined;
     let deliveryAddress = bidRequest.deliveryAddress ?? undefined;
@@ -414,16 +471,12 @@ demandRouter.patch(
     }
 
     const updated = await prisma.$transaction(async (tx) => {
-      if (body.items) {
+      if (canonicalItems) {
         await tx.bidRequestItem.deleteMany({ where: { bidRequestId: id } });
         await tx.bidRequestItem.createMany({
-          data: body.items.map((i) => ({
+          data: canonicalItems.map((i) => ({
             bidRequestId: id,
-            name: i.name,
-            quantity: i.quantity,
-            unit: i.unit,
-            productCategory: i.productCategory,
-            gradeHint: i.gradeHint,
+            ...itemCreateData(i),
           })),
         });
       }
@@ -574,6 +627,10 @@ demandRouter.post(
             unit: i.unit,
             productCategory: i.productCategory,
             gradeHint: i.gradeHint,
+            catalogCategory: i.catalogCategory,
+            catalogItemSlug: i.catalogItemSlug,
+            minimumOrderQty: i.minimumOrderQty,
+            minimumOrderUnit: i.minimumOrderUnit,
           })),
         },
       },

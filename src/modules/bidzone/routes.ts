@@ -11,8 +11,9 @@ import { getSupplierBidCap } from '../subscriptions/service';
 import { config } from '../../config';
 import { emitAuction } from '../../socket';
 import { sendPush } from '../../lib/notify';
-import { createOrderFromAcceptedBid } from '../orders/service';
+import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/service';
 import { shelfRulesForItems } from '../../lib/product-categories';
+import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 
 export const bidzoneRouter = Router();
 
@@ -195,6 +196,11 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
           unit: true,
           productCategory: true,
           gradeHint: true,
+          catalogCategory: true,
+          catalogItemSlug: true,
+          minimumOrderQty: true,
+          minimumOrderUnit: true,
+          status: true,
         },
       },
       bids: {
@@ -298,47 +304,72 @@ bidzoneRouter.post(
       );
     }
 
-    // Enforce product-doc Minimum RSL matrix for cart categories on this RFQ.
-    const rules = shelfRulesForItems(bidRequest.items);
-    if (body.rslDaysAtDelivery < rules.minRslDays) {
-      throw new AppError(
-        400,
-        'RSL_BELOW_MATRIX',
-        `Minimum RSL for this request is ${rules.minRslDays} day(s) at delivery (category matrix). You entered ${body.rslDaysAtDelivery}.`,
-      );
-    }
-    if (body.shelfLifeDays < rules.minRslDays) {
-      throw new AppError(
-        400,
-        'SHELF_BELOW_MATRIX',
-        `Total shelf life must be at least ${rules.minRslDays} day(s) for this category cart.`,
-      );
-    }
-
     const lines = body.lines || [];
-    const isPartial = lines.length > 0;
+    const isItemized = lines.length > 0;
 
-    if (!body.amountPaise && !isPartial) {
+    if (!body.amountPaise && !isItemized) {
       throw new AppError(400, 'AMOUNT_OR_LINES_REQUIRED', 'Either amountPaise or per-item lines must be provided');
     }
 
-    const bidAmountPaise = isPartial
-      ? lines.reduce((sum, l) => sum + l.amountPaise, 0)
-      : body.amountPaise!;
-    const coveredItemIds = isPartial
-      ? lines.map((l) => l.bidRequestItemId)
-      : [];
-
-    const minDecrementPaise = config.auction.minDecrementPaise;
-
-    if (isPartial) {
+    if (isItemized) {
+      const ids = lines.map((l) => l.bidRequestItemId);
+      if (new Set(ids).size !== ids.length) {
+        throw new AppError(400, 'DUPLICATE_LINE', 'Each item can appear only once in a bid');
+      }
       const reqItemIds = bidRequest.items.map((i) => i.id);
       for (const line of lines) {
         if (!reqItemIds.includes(line.bidRequestItemId)) {
           throw new AppError(400, 'INVALID_ITEM_ID', `Item ${line.bidRequestItemId} is not in the bid request`);
         }
       }
+    }
 
+    const bidAmountPaise = isItemized
+      ? lines.reduce((sum, l) => sum + l.amountPaise, 0)
+      : body.amountPaise!;
+    const coveredItemIds = isItemized
+      ? lines.map((l) => l.bidRequestItemId)
+      : [];
+    const isPartial = isItemized && coveredItemIds.length < bidRequest.items.length;
+
+    const coveredItems = isItemized
+      ? bidRequest.items.filter((i) => coveredItemIds.includes(i.id))
+      : bidRequest.items;
+
+    for (const item of coveredItems) {
+      if (item.minimumOrderQty == null || !item.minimumOrderUnit) continue;
+      const from = (item.unit as CatalogUnit) || 'kg';
+      const to = item.minimumOrderUnit as CatalogUnit;
+      const qty = quantityInUnit(item.quantity, from, to);
+      if (qty != null && qty + 1e-9 < item.minimumOrderQty) {
+        throw new AppError(
+          400,
+          'MOQ_BELOW_MINIMUM',
+          `Requested quantity for ${item.name} is below the ${item.minimumOrderQty} ${item.minimumOrderUnit} minimum`,
+        );
+      }
+    }
+
+    // Enforce product-doc Minimum RSL matrix for items this bid covers.
+    const rules = shelfRulesForItems(coveredItems);
+    if (body.rslDaysAtDelivery < rules.minRslDays) {
+      throw new AppError(
+        400,
+        'RSL_BELOW_MATRIX',
+        `Minimum RSL for the covered items is ${rules.minRslDays} day(s) at delivery (category matrix). You entered ${body.rslDaysAtDelivery}.`,
+      );
+    }
+    if (body.shelfLifeDays < rules.minRslDays) {
+      throw new AppError(
+        400,
+        'SHELF_BELOW_MATRIX',
+        `Total shelf life must be at least ${rules.minRslDays} day(s) for the covered items.`,
+      );
+    }
+
+    const minDecrementPaise = config.auction.minDecrementPaise;
+
+    if (isItemized) {
       for (const line of lines) {
         const bestLine = await prisma.bidLineItem.findFirst({
           where: {
@@ -385,7 +416,7 @@ bidzoneRouter.post(
     }
 
     let proRatedBudgetPaise = bidRequest.budgetPaise;
-    if (isPartial && bidRequest.budgetPaise != null) {
+    if (isItemized && bidRequest.budgetPaise != null) {
       const totalQty = bidRequest.items.reduce((sum, i) => sum + i.quantity, 0);
       const coveredQty = bidRequest.items
         .filter((i) => coveredItemIds.includes(i.id))
@@ -430,6 +461,15 @@ bidzoneRouter.post(
     const bidExpiresAt = computeBidExpiresAt(liveEndsAt);
 
     const bid = await prisma.$transaction(async (tx) => {
+      await tx.bid.updateMany({
+        where: {
+          bidRequestId: bidRequest.id,
+          supplierId: profile.id,
+          status: 'active',
+        },
+        data: { status: 'withdrawn' },
+      });
+
       const createdBid = await tx.bid.create({
         data: {
           bidRequestId: bidRequest.id,
@@ -453,7 +493,7 @@ bidzoneRouter.post(
         },
       });
 
-      if (isPartial) {
+      if (isItemized) {
         await tx.bidLineItem.createMany({
           data: lines.map((l) => ({
             bidId: createdBid.id,
@@ -753,6 +793,9 @@ bidzoneRouter.get(
     // 2. Filter by itemId
     if (itemId) {
       filteredBids = filteredBids.filter((b) => {
+        if (b.bidLines.length > 0) {
+          return b.bidLines.some((l) => l.bidRequestItemId === itemId);
+        }
         if (b.coveredItemIds.length === 0) return true;
         return b.coveredItemIds.includes(itemId);
       });
@@ -908,6 +951,198 @@ bidzoneRouter.post(
       order,
       bindOnAccept: true,
       message: 'Bid accepted. Order created — chat and tracking are available.',
+    });
+  },
+);
+
+const awardPlanSchema = z.object({
+  selections: z
+    .array(
+      z.object({
+        bidRequestItemId: z.string().min(1),
+        bidId: z.string().min(1),
+      }),
+    )
+    .min(1),
+});
+
+/**
+ * Atomic split award: one live itemized bid per open item, then one order per winning supplier.
+ */
+bidzoneRouter.post(
+  '/consumer/bid-requests/:id/award-plan',
+  authenticate,
+  requireRole('consumer'),
+  validateBody(awardPlanSchema),
+  async (req, res) => {
+    const bidRequestId = requireParam(req, 'id');
+    const { selections } = req.body as z.infer<typeof awardPlanSchema>;
+    const bidRequest = assertFound(
+      await prisma.bidRequest.findUnique({
+        where: { id: bidRequestId },
+        include: { consumer: true, items: true },
+      }),
+    );
+    if (bidRequest.consumer.userId !== req.user!.id) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your request');
+    }
+    if (bidRequest.status !== 'open') {
+      throw new AppError(400, 'NOT_OPEN', 'Request is no longer open');
+    }
+
+    const selectedItemIds = selections.map((s) => s.bidRequestItemId);
+    if (new Set(selectedItemIds).size !== selectedItemIds.length) {
+      throw new AppError(400, 'DUPLICATE_ITEM', 'Each item can have only one winner');
+    }
+
+    const openItems = bidRequest.items.filter((i) => i.status === 'open');
+    if (openItems.length === 0) {
+      throw new AppError(400, 'NOTHING_TO_AWARD', 'All items are already awarded');
+    }
+    const openIds = new Set(openItems.map((i) => i.id));
+    if (selectedItemIds.length !== openItems.length || selectedItemIds.some((id) => !openIds.has(id))) {
+      throw new AppError(
+        400,
+        'INCOMPLETE_SELECTION',
+        'Select exactly one winning bid for every remaining item',
+      );
+    }
+
+    const bidIds = [...new Set(selections.map((s) => s.bidId))];
+    const bids = await prisma.bid.findMany({
+      where: { id: { in: bidIds }, bidRequestId },
+      include: { bidLines: true, supplier: true },
+    });
+    if (bids.length !== bidIds.length) {
+      throw new AppError(400, 'BID_NOT_FOUND', 'One or more selected bids were not found');
+    }
+
+    const bidById = new Map(bids.map((b) => [b.id, b]));
+    const bySupplier = new Map<
+      string,
+      { bidId: string; supplierUserId: string; itemIds: string[] }
+    >();
+    for (const sel of selections) {
+      const b = bidById.get(sel.bidId)!;
+      if (!isBidStillLive(b) && b.status !== 'accepted') {
+        throw new AppError(400, 'BID_EXPIRED', 'A selected bid is no longer live');
+      }
+      const itemized = b.bidLines.length > 0 || b.coveredItemIds.length > 0;
+      if (!itemized) {
+        throw new AppError(
+          400,
+          'NOT_ITEMIZED',
+          'Split awards require itemized bids. Use Accept on a full-basket offer, or ask the supplier to rebid per item.',
+        );
+      }
+      const covers =
+        b.coveredItemIds.length === 0 && b.bidLines.length === 0
+          ? bidRequest.items.map((i) => i.id)
+          : b.coveredItemIds.length > 0
+            ? b.coveredItemIds
+            : b.bidLines.map((l) => l.bidRequestItemId);
+      if (!covers.includes(sel.bidRequestItemId)) {
+        throw new AppError(400, 'ITEM_NOT_COVERED', 'Selected bid does not cover that item');
+      }
+      const grouped = bySupplier.get(b.supplierId);
+      if (!grouped) {
+        bySupplier.set(b.supplierId, {
+          bidId: b.id,
+          supplierUserId: b.supplier.userId,
+          itemIds: [sel.bidRequestItemId],
+        });
+      } else {
+        if (grouped.bidId !== b.id) {
+          throw new AppError(
+            400,
+            'CONFLICTING_SELECTION',
+            'A supplier can win through only one bid on this request',
+          );
+        }
+        grouped.itemIds.push(sel.bidRequestItemId);
+      }
+    }
+
+    const orders = await prisma.$transaction(async (tx) => {
+      const current = await tx.bidRequest.findUnique({
+        where: { id: bidRequestId },
+        select: { status: true },
+      });
+      if (!current || current.status !== 'open') {
+        throw new AppError(400, 'NOT_OPEN', 'Already awarded');
+      }
+
+      const liveItems = await tx.bidRequestItem.findMany({ where: { bidRequestId } });
+      for (const sel of selections) {
+        const item = liveItems.find((i) => i.id === sel.bidRequestItemId);
+        if (!item || item.status === 'awarded') {
+          throw new AppError(400, 'ALREADY_AWARDED', 'An item was awarded concurrently');
+        }
+      }
+
+      for (const sel of selections) {
+        await tx.bidRequestItem.update({
+          where: { id: sel.bidRequestItemId },
+          data: { status: 'awarded', awardedBidId: sel.bidId },
+        });
+      }
+
+      await tx.bid.updateMany({
+        where: { id: { in: bidIds } },
+        data: {
+          status: 'accepted',
+          acceptedAt: new Date(),
+          consumerAckAt: new Date(),
+        },
+      });
+
+      await tx.bid.updateMany({
+        where: {
+          bidRequestId,
+          status: 'active',
+          id: { notIn: bidIds },
+        },
+        data: { status: 'rejected' },
+      });
+
+      await tx.bidRequest.update({
+        where: { id: bidRequestId },
+        data: { status: 'awarded', winningBidId: bidIds[0] },
+      });
+
+      const created = [];
+      for (const group of bySupplier.values()) {
+        const order = await createOrderFromAcceptedBid(group.bidId, {
+          coveredItemIds: group.itemIds,
+          tx,
+          emitRealtime: false,
+        });
+        created.push(order);
+      }
+      return created;
+    }, { timeout: 20000 });
+
+    for (const order of orders) {
+      emitOrderChatCreated(order);
+      emitAuction(bidRequestId, 'order.created', { orderId: order.id });
+      const winner = [...bidById.values()].find((b) => b.id === order.bidId);
+      if (winner) {
+        await sendPush({
+          userId: winner.supplier.userId,
+          title: 'You won items',
+          body: `Order ${order.orderCode} is ready — open it to chat and start preparing.`,
+          data: { bidId: order.bidId, orderId: order.id },
+        });
+      }
+    }
+
+    emitAuction(bidRequestId, 'auction.bid_accepted', { bidIds });
+
+    res.json({
+      bidIds,
+      orders,
+      bindOnAccept: true,
+      message: `Awarded to ${orders.length} supplier${orders.length === 1 ? '' : 's'}.`,
     });
   },
 );

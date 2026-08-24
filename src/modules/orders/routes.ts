@@ -135,6 +135,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
         deliveryLng: true,
         deliveryAddress: true,
         deliveredAt: true,
+        coveredItemIds: true,
         createdAt: true,
         updatedAt: true,
         bid: {
@@ -164,10 +165,13 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
             budgetPaise: true,
             items: {
               select: {
+                id: true,
                 name: true,
                 quantity: true,
                 unit: true,
                 productCategory: true,
+                catalogCategory: true,
+                catalogItemSlug: true,
               },
             },
           },
@@ -225,10 +229,13 @@ const listOrderInclude = {
       deliveryAddress: true,
       items: {
         select: {
+          id: true,
           name: true,
           quantity: true,
           unit: true,
           productCategory: true,
+          catalogCategory: true,
+          catalogItemSlug: true,
         },
         take: 8,
       },
@@ -241,28 +248,50 @@ function presentOrder<T extends {
   deliveryLat?: number | null;
   deliveryLng?: number | null;
   deliveryAddress?: string | null;
+  coveredItemIds?: string[];
   bid?: { amountPaise?: number; grade?: string; rslDaysAtDelivery?: number } | null;
   bidRequest?: {
     deliveryWindow?: string | null;
     deliveryAddress?: string | null;
     items?: Array<{
+      id?: string;
       name: string;
       quantity: number;
       unit: string;
       productCategory: string | null;
+      catalogCategory?: string | null;
+      catalogItemSlug?: string | null;
     }>;
   } | null;
   digitalChallan?: { lineSnapshotJson?: unknown } | null;
 }>(order: T) {
-  const totalPaise = order.bid?.amountPaise ?? 0;
-  const items =
-    order.bidRequest?.items?.map((i) => ({
-      name: i.name,
-      quantity: i.quantity,
-      qty: i.quantity,
-      unit: i.unit,
-      productCategory: i.productCategory,
-    })) ?? [];
+  const covered = order.coveredItemIds ?? [];
+  const rawItems = order.bidRequest?.items ?? [];
+  const scoped =
+    covered.length > 0
+      ? rawItems.filter((i) => !i.id || covered.includes(i.id))
+      : rawItems;
+  const items = scoped.map((i) => ({
+    id: i.id,
+    name: i.name,
+    quantity: i.quantity,
+    qty: i.quantity,
+    unit: i.unit,
+    productCategory: i.productCategory,
+    catalogCategory: i.catalogCategory ?? null,
+    catalogItemSlug: i.catalogItemSlug ?? null,
+  }));
+  const snapshot = order.digitalChallan?.lineSnapshotJson;
+  let totalPaise = order.bid?.amountPaise ?? 0;
+  if (Array.isArray(snapshot)) {
+    const summed = snapshot.reduce<number>((sum, row) => {
+      if (!row || typeof row !== 'object') return sum;
+      const n = (row as { amountPaise?: unknown; lineTotalPaise?: unknown }).lineTotalPaise
+        ?? (row as { amountPaise?: unknown }).amountPaise;
+      return sum + (typeof n === 'number' ? n : 0);
+    }, 0);
+    if (summed > 0) totalPaise = summed;
+  }
   const hasDeliveryPin =
     typeof order.deliveryLat === 'number' && typeof order.deliveryLng === 'number';
   return {
@@ -852,10 +881,13 @@ ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
           select: {
             items: {
               select: {
+                id: true,
                 name: true,
                 quantity: true,
                 unit: true,
                 productCategory: true,
+                catalogCategory: true,
+                catalogItemSlug: true,
               },
             },
           },

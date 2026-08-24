@@ -18,6 +18,7 @@ import { supportRouter } from './modules/support/routes';
 import { uploadsRouter } from './modules/uploads/routes';
 import { notificationsRouter } from './modules/notifications/routes';
 import { dashboardRouter } from './modules/dashboard/routes';
+import { catalogRouter } from './modules/catalog/routes';
 import { isFirebaseReady, initFirebase } from './lib/notify';
 import { getRedisStatus, redisPing } from './lib/redis';
 import { config } from './config';
@@ -97,6 +98,7 @@ export function createApp() {
   app.use('/v1', uploadsRouter);
   app.use('/v1', kycRouter);
   app.use('/v1', subscriptionsRouter);
+  app.use('/v1', catalogRouter);
   app.use('/v1', demandRouter);
   app.use('/v1', bidzoneRouter);
   app.use('/v1', ordersRouter);

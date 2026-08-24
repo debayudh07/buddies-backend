@@ -239,17 +239,27 @@ model BidRequest {
 }
 
 model BidRequestItem {
-  id              String                 @id @default(uuid())
-  bidRequestId    String
-  name            String
-  quantity        Float
-  unit            String
-  productCategory String?
-  gradeHint       String?
-  status          BidRequestItemStatus   @default(open)
+  id                String               @id @default(uuid())
+  bidRequestId      String
+  name              String
+  quantity          Float
+  unit              String
+  productCategory   String?
+  gradeHint         String?
+  status            BidRequestItemStatus @default(open)
+  /// Commercial catalog category slug (The buddies.pdf)
+  catalogCategory   String?
+  catalogItemSlug   String?
+  minimumOrderQty   Float?
+  minimumOrderUnit  String?
+  awardedBidId      String?
 
   bidRequest BidRequest    @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
   bidLines   BidLineItem[]
+  awardedBid Bid?          @relation("AwardedBidItems", fields: [awardedBidId], references: [id])
+
+  @@index([awardedBidId])
+  @@index([bidRequestId, status])
 }
 
 model BidLineItem {
@@ -293,10 +303,11 @@ model Bid {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  bidRequest BidRequest      @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
-  supplier   SupplierProfile @relation(fields: [supplierId], references: [id])
-  order      Order?
-  bidLines   BidLineItem[]
+  bidRequest   BidRequest        @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+  supplier     SupplierProfile   @relation(fields: [supplierId], references: [id])
+  order        Order?
+  bidLines     BidLineItem[]
+  awardedItems BidRequestItem[]  @relation("AwardedBidItems")
 
   @@index([bidRequestId, status])
   @@index([supplierId, status])
