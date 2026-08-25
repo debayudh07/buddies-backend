@@ -55,7 +55,7 @@ async function resolveDevAuth(header: string): Promise<AuthUser | null> {
       data: {
         id: userId,
         role,
-        displayName: `Dev ${role}`,
+        displayName: null,
         phone: '+910000000000',
       },
       select: { id: true, role: true, supabaseId: true },

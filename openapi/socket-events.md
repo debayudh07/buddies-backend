@@ -1,25 +1,32 @@
-# Socket.IO event catalog
+# Live events (Supabase Realtime Broadcast)
 
-## Client → server
+Clients subscribe with `Supabase.channel(topic).onBroadcast(...)`.
+There is no Socket.IO dual-publish. Room names match topic strings.
 
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `join` | `string` room | Join `auction:{id}`, `chat:{id}`, `tracking:{id}`, `bidzone:all` |
-| `leave` | `string` room | Leave room |
+## Client → server (HTTP)
+
+Live writes go through REST. Clients may `sendBroadcastMessage` for typing only
+(`chat.typing`).
 
 ## Server → client
 
-| Event | Room | Payload |
-|-------|------|---------|
+| Event | Topic | Payload |
+|-------|-------|---------|
 | `demand.request_created` | `bidzone:all` | `{ id, batchCode, liveEndsAt, itemCount }` |
-| `auction.bid_placed` | `auction:{bidRequestId}` | `{ bid, liveEndsAt, extendCount }` |
+| `demand.request_updated` | `bidzone:all` | `{ id, batchCode, itemCount, liveEndsAt }` |
+| `demand.request_cancelled` | `bidzone:all` | `{ id, batchCode }` |
+| `demand.reordered` | `auction:{bidRequestId}` | `{ id }` |
+| `auction.updated` | `auction:{bidRequestId}` | `{ bidRequestId, deliveryWindow, itemCount }` |
+| `auction.cancelled` | `auction:{bidRequestId}` | `{ bidRequestId, status: 'cancelled' }` |
+| `auction.bid_placed` | `auction:{bidRequestId}` | `{ bid, liveEndsAt, extendCount, bidExpiresAt, bidTtlSec }` |
 | `auction.bid_withdrawn` | `auction:{bidRequestId}` | `{ bidId }` |
-| `auction.bid_accepted` | `auction:{bidRequestId}` | `{ bidId }` |
+| `auction.bid_accepted` | `auction:{bidRequestId}` | `{ bidId }` or `{ bidIds }` |
 | `auction.bid_rejected` | `auction:{bidRequestId}` | `{ bidId }` |
 | `order.created` | `auction:{bidRequestId}` | `{ orderId }` |
 | `order.status_changed` | `tracking:{orderId}` | `{ orderId, status, paymentStatus?, reason?, at }` |
-| `order.updated` | `tracking:{orderId}`, `user:{userId}` | same payload — preference for list + detail quiet reloads |
+| `order.updated` | `tracking:{orderId}`, `user:{consumerId}`, `user:{supplierId}` | same payload |
 | `tracking.location_updated` | `tracking:{orderId}` | `{ point, etaMinutes }` |
-| (ratings) | via `order.updated` reason=`rating_submitted` | After optional mutual star rating on closed order |
 | `chat.thread_created` | `chat:{threadId}` | `{ threadId, orderId }` |
 | `chat.message_created` | `chat:{threadId}` | `{ message }` |
+| `chat.typing` | `chat:{threadId}` | `{ typing, userId, orderId }` |
+| `notify.created` | `user:{userId}` | `{ notification }` |

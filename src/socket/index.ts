@@ -2,14 +2,13 @@ import { Server as HttpServer } from 'http';
 import { Server } from 'socket.io';
 import { config } from '../config';
 import { resolveAuthFromHeader } from '../middleware/auth';
-import { setSocketEmitters } from '../lib/realtime';
 import { logger } from '../lib/logger';
 
 let io: Server | null = null;
 
 /**
- * Socket.IO hub kept for dual-publish during Realtime cutover.
- * Handshake requires JWT (same as HTTP). Room joins must match topic ACL patterns.
+ * Optional Socket.IO hub. Live events are published via Supabase Broadcast.
+ * Handshake still requires JWT if a legacy client connects.
  */
 export function initSocket(httpServer: HttpServer): Server {
   const origin =
@@ -68,14 +67,6 @@ export function initSocket(httpServer: HttpServer): Server {
     });
   });
 
-  setSocketEmitters({
-    auction: (id, event, payload) => getIo().to(`auction:${id}`).emit(event, payload),
-    chat: (id, event, payload) => getIo().to(`chat:${id}`).emit(event, payload),
-    tracking: (id, event, payload) => getIo().to(`tracking:${id}`).emit(event, payload),
-    bidzone: (id, event, payload) => getIo().to(`bidzone:${id}`).emit(event, payload),
-    user: (id, event, payload) => getIo().to(`user:${id}`).emit(event, payload),
-  });
-
   return io;
 }
 
@@ -104,7 +95,7 @@ export function getIo(): Server {
   return io;
 }
 
-// Re-export broadcast helpers so dual-publish remains the single API.
+// Re-export broadcast helpers.
 export {
   emitAuction,
   emitChat,

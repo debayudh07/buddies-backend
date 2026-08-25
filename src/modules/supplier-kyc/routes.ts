@@ -135,11 +135,11 @@ kycRouter.post('/supplier/kyc/dev-verify', authenticate, requireRole('supplier')
     : await prisma.supplierProfile.create({
         data: {
           userId,
-          businessName: 'Dev Supplier',
-          ownerName: user?.displayName?.trim() || 'Dev Owner',
+          businessName: user?.displayName?.trim() || 'My shop',
+          ownerName: user?.displayName?.trim() || 'Owner',
           ownerPhone: user?.phone || '+910000000000',
-          shopAddressPrivate: 'Dev address',
-          publicLabel: 'Dev Supplier',
+          shopAddressPrivate: 'Address pending',
+          publicLabel: user?.displayName?.trim() || 'Local supplier',
           kycStatus: 'verified',
           categories: [],
         },

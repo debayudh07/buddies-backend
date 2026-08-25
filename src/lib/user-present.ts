@@ -1,13 +1,18 @@
-import type { SupplierProfile, User } from '@prisma/client';
+import type { ConsumerProfile, SupplierProfile, User } from '@prisma/client';
 import { createSignedUrlForRef } from './storage';
+import { prisma } from './prisma';
+import { consumerPublicRating, supplierPublicRating } from './ratings';
 
-type UserWithSupplier = User & { supplierProfile?: SupplierProfile | null };
+type UserWithProfiles = User & {
+  supplierProfile?: SupplierProfile | null;
+  consumerProfile?: ConsumerProfile | null;
+};
 
 const avatarCache = new Map<string, { url: string | null; exp: number }>();
 const AVATAR_TTL_MS = 30 * 60 * 1000; // 30 min (signed URLs last 6h)
 
 /** Attach a short-lived signed avatar URL + flattened KYC status for clients. */
-export async function presentUser<T extends UserWithSupplier | null>(user: T) {
+export async function presentUser<T extends UserWithProfiles | null>(user: T) {
   if (!user) return null;
   let avatarUrl: string | null = null;
   if (user.avatarStorageRef) {
@@ -28,10 +33,39 @@ export async function presentUser<T extends UserWithSupplier | null>(user: T) {
       }
     }
   }
+
+  let rating: number | null = null;
+  let ratingCount = 0;
+  let onTimeRate: number | null = null;
+  let trustScore: number | null = null;
+  if (user.supplierProfile) {
+    const snap = supplierPublicRating(user.supplierProfile);
+    rating = snap.displayed;
+    ratingCount = snap.ratingCount;
+    onTimeRate = user.supplierProfile.onTimeRate;
+  } else if (user.consumerProfile) {
+    const snap = consumerPublicRating(user.consumerProfile);
+    rating = snap.displayed;
+    ratingCount = snap.ratingCount;
+    trustScore = user.consumerProfile.trustScore;
+  }
+
+  const recentReviews = await prisma.orderRating.findMany({
+    where: { toUserId: user.id },
+    orderBy: { createdAt: 'desc' },
+    take: 8,
+    select: { stars: true, comment: true, createdAt: true, fromRole: true },
+  });
+
   return {
     ...user,
     avatarUrl,
     kycStatus: user.supplierProfile?.kycStatus ?? null,
+    rating,
+    ratingCount,
+    onTimeRate,
+    trustScore,
+    recentReviews,
   };
 }
 
