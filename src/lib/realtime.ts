@@ -57,3 +57,7 @@ export function emitBidzone(geoKey: string, event: string, payload: unknown) {
 export function emitUser(userId: string, event: string, payload: unknown) {
   void broadcast(`user:${userId}`, event, payload);
 }
+
+export function emitReturn(claimId: string, event: string, payload: unknown) {
+  void broadcast(`return:${claimId}`, event, payload);
+}

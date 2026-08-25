@@ -6,7 +6,8 @@ import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
 import { config } from '../../config';
-import { emitAuction, emitBidzone } from '../../socket';
+import { emitAuction, emitBidzone, emitUser } from '../../socket';
+import { publicSupplierLabel } from '../../lib/user-present';
 import { notifyMany } from '../../lib/notify';
 import {
   categorySlugs,
@@ -401,6 +402,17 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
   res.json({
     bidRequest: {
       ...rest,
+      bids: (rest.bids ?? []).map((b) =>
+        b.supplier
+          ? {
+              ...b,
+              supplier: {
+                ...b.supplier,
+                publicLabel: publicSupplierLabel(b.supplier),
+              },
+            }
+          : b,
+      ),
       itemsStatus,
       editPolicy: {
         canEditMeta: canEditMeta(bidRequest.status, bidRequest.liveEndsAt, now),
@@ -508,6 +520,10 @@ demandRouter.patch(
       itemCount: updated.items.length,
       liveEndsAt: updated.liveEndsAt,
     });
+    emitUser(bidRequest.consumer.userId, 'bidRequest.updated', {
+      id,
+      status: updated.status,
+    });
 
     const itemsPolicy = itemsEditPolicy(updated.createdAt, new Date());
     res.json({
@@ -583,6 +599,10 @@ demandRouter.post(
     emitBidzone('all', 'demand.request_cancelled', {
       id,
       batchCode: bidRequest.batchCode,
+    });
+    emitUser(bidRequest.consumer.userId, 'bidRequest.updated', {
+      id,
+      status: 'cancelled',
     });
 
     res.json({ bidRequest: updated, message: 'Bid request cancelled' });

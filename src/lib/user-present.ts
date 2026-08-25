@@ -8,6 +8,29 @@ type UserWithProfiles = User & {
   consumerProfile?: ConsumerProfile | null;
 };
 
+/** Drop empty or `Dev …` / `dev:` labels so they never reach clients. */
+export function sanitizeLabel(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const s = value.trim();
+  if (!s) return null;
+  if (/^dev[ :]/i.test(s)) return null;
+  return s;
+}
+
+export function publicSupplierLabel(
+  profile:
+    | { publicLabel?: string | null; businessName?: string | null }
+    | null
+    | undefined,
+  fallback = 'Local supplier',
+): string {
+  return (
+    sanitizeLabel(profile?.publicLabel) ??
+    sanitizeLabel(profile?.businessName) ??
+    fallback
+  );
+}
+
 const avatarCache = new Map<string, { url: string | null; exp: number }>();
 const AVATAR_TTL_MS = 30 * 60 * 1000; // 30 min (signed URLs last 6h)
 
@@ -57,10 +80,34 @@ export async function presentUser<T extends UserWithProfiles | null>(user: T) {
     select: { stars: true, comment: true, createdAt: true, fromRole: true },
   });
 
+  const supplier = user.supplierProfile
+    ? {
+        ...user.supplierProfile,
+        publicLabel: publicSupplierLabel(user.supplierProfile),
+        businessName:
+          sanitizeLabel(user.supplierProfile.businessName) ??
+          user.supplierProfile.businessName,
+        ownerName:
+          sanitizeLabel(user.supplierProfile.ownerName) ??
+          user.supplierProfile.ownerName,
+      }
+    : user.supplierProfile;
+  const consumer = user.consumerProfile
+    ? {
+        ...user.consumerProfile,
+        restaurantName:
+          sanitizeLabel(user.consumerProfile.restaurantName) ??
+          user.consumerProfile.restaurantName,
+      }
+    : user.consumerProfile;
+
   return {
     ...user,
+    displayName: sanitizeLabel(user.displayName),
+    supplierProfile: supplier,
+    consumerProfile: consumer,
     avatarUrl,
-    kycStatus: user.supplierProfile?.kycStatus ?? null,
+    kycStatus: supplier?.kycStatus ?? null,
     rating,
     ratingCount,
     onTimeRate,

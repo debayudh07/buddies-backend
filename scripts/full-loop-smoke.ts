@@ -64,6 +64,33 @@ async function api(
   return data;
 }
 
+async function expectHttp(
+  step: string,
+  method: string,
+  path: string,
+  token: string,
+  body: unknown,
+  status: number,
+): Promise<void> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (res.status !== status) {
+    const text = await res.text();
+    const detail = `expected HTTP ${status}, got ${res.status} ${method} ${path} → ${text.slice(0, 400)}`;
+    results.push({ ok: false, step, detail });
+    failed = true;
+    throw new Error(`[FAIL] ${step}: ${detail}`);
+  }
+  results.push({ ok: true, step });
+  log(`  ✓ ${step} (${status})`);
+}
+
 async function upload(
   step: string,
   purpose: string,
@@ -135,7 +162,7 @@ async function main() {
     city: 'Bengaluru',
     lat: 12.97,
     lng: 77.59,
-    displayName: 'Smoke Consumer',
+    displayName: 'Priya Sharma',
   });
   await api('consumer privacy', 'POST', '/me/privacy-accept', C);
   const addrRes = await api('consumer address', 'POST', '/consumer/addresses', C, {
@@ -168,7 +195,7 @@ async function main() {
   const kycUpload = await upload('kyc image upload', 'kyc', S, TINY_PNG, 'kyc.png', 'image/png');
   await api('kyc upsert', 'POST', '/supplier/kyc', S, {
     businessName: 'Smoke Fresh Mart',
-    ownerName: 'Dev Supplier',
+    ownerName: 'Ravi Kumar',
     ownerPhone: '+919876543210',
     gstin: '29AAAAA0000A1Z5',
     aadhaarRef: kycUpload.storageRef,
@@ -346,6 +373,77 @@ async function main() {
   });
   await api('signed url', 'GET', `/uploads/signed-url?storageRef=${encodeURIComponent(evidenceUpload.storageRef)}`, C);
   await api('return submit', 'POST', `/return-claims/${claimId}/submit`, C);
+
+  log('\n11b. Return: full offline refund loop');
+  await expectHttp(
+    'consumer cannot record refund',
+    'POST',
+    `/return-claims/${claimId}/refund`,
+    C,
+    { amountPaise: 10000 },
+    403,
+  );
+  await expectHttp(
+    'supplier cannot consumer-ack',
+    'POST',
+    `/return-claims/${claimId}/consumer-ack`,
+    S,
+    undefined,
+    403,
+  );
+  await api('return accept + pickup window', 'POST', `/return-claims/${claimId}/supplier-decision`, S, {
+    decision: 'accept',
+    resolutionType: 'refund',
+    pickupWindow: 'Tomorrow 4-6 pm',
+    notes: 'Pickup at the back gate',
+  });
+  await api('return schedule pickup', 'POST', `/return-claims/${claimId}/schedule-pickup`, S, {
+    pickupWindow: 'Tomorrow 4-6 pm',
+  });
+  const chat = await api('return chat get', 'GET', `/return-claims/${claimId}/chat`, C);
+  log(`  → return thread ${chat.threadId ?? chat.thread?.id ?? '(ok)'}`);
+  await api('return chat send', 'POST', `/return-claims/${claimId}/chat/messages`, C, {
+    body: 'Bag is ready at the back gate',
+  });
+  await api('return chat typing', 'POST', `/return-claims/${claimId}/chat/typing`, S, {
+    typing: true,
+  });
+  await api('return confirm pickup', 'POST', `/return-claims/${claimId}/confirm-pickup`, S);
+  await api('return record refund', 'POST', `/return-claims/${claimId}/refund`, S, {
+    amountPaise: 50000,
+    receiptRef: 'UPI-REFUND-SMOKE-1',
+  });
+  await api('return consumer ack', 'POST', `/return-claims/${claimId}/consumer-ack`, C);
+
+  log('\n11c. Return: replacement loop');
+  const claim2 = await api('create replacement return', 'POST', `/orders/${orderId}/return-claims`, C, {
+    reasonCode: 'leakage',
+    productCategory: 'fresh_produce',
+    lineItemIds: [],
+    notes: 'Need replacement crate',
+  });
+  const claim2Id = claim2.claim?.id ?? claim2.id;
+  await api('replacement evidence', 'POST', `/return-claims/${claim2Id}/evidence`, C, {
+    storageRef: evidenceUpload.storageRef,
+    mediaType: evidenceUpload.mediaType,
+    defectNote: 'Swap needed',
+  });
+  await api('replacement submit', 'POST', `/return-claims/${claim2Id}/submit`, C);
+  await api('replacement accept', 'POST', `/return-claims/${claim2Id}/supplier-decision`, S, {
+    decision: 'accept',
+    resolutionType: 'replacement',
+  });
+  await api('replacement confirm pickup', 'POST', `/return-claims/${claim2Id}/confirm-pickup`, S);
+  await expectHttp(
+    'cannot refund a replacement claim',
+    'POST',
+    `/return-claims/${claim2Id}/refund`,
+    S,
+    { amountPaise: 10000 },
+    400,
+  );
+  await api('replacement delivered', 'POST', `/return-claims/${claim2Id}/replaced`, S);
+  await api('replacement consumer ack', 'POST', `/return-claims/${claim2Id}/consumer-ack`, C);
 
   // Offline payment (+ screenshot upload) — FCM fires on return submit / status changes
   log('\n12. Offline payment');

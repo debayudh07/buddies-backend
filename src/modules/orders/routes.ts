@@ -14,6 +14,7 @@ import { etaMinutes, haversineKm } from '../../lib/haversine';
 import { redisGet, redisSet } from '../../lib/redis';
 import { buildInvoicePdf } from '../../lib/invoice-pdf';
 import { parseLimit } from '../../lib/pagination';
+import { publicSupplierLabel } from '../../lib/user-present';
 import {
   responseCacheGet,
   responseCacheInvalidate,
@@ -190,7 +191,11 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
         gstInvoice: {
           select: { id: true, invoiceNumber: true },
         },
-        chatThread: { select: { id: true, orderId: true } },
+        chatThreads: {
+          where: { threadKind: 'order' },
+          take: 1,
+          select: { id: true, orderId: true },
+        },
         trackingSession: {
           select: { id: true, active: true, lastPointAt: true, startedAt: true },
         },
@@ -216,7 +221,20 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
   if (role !== 'admin' && order.consumerUserId !== userId && order.supplierUserId !== userId) {
     throw new AppError(403, 'FORBIDDEN', 'Not your order');
   }
-  return order;
+  const supplier = order.bid?.supplier;
+  const chatThread = order.chatThreads[0] ?? null;
+  return {
+    ...order,
+    chatThread,
+    bid: order.bid
+      ? {
+          ...order.bid,
+          supplier: supplier
+            ? { ...supplier, publicLabel: publicSupplierLabel(supplier) }
+            : supplier,
+        }
+      : order.bid,
+  };
 }
 
 const listOrderInclude = {
@@ -1003,7 +1021,7 @@ async function loadInvoiceBundle(orderId: string, userId: string, role: string) 
       amountPaise,
       totalPaise: amountPaise,
       orderCode: order.orderCode,
-      supplierLabel: supplier?.publicLabel ?? supplier?.businessName ?? 'Supplier',
+      supplierLabel: publicSupplierLabel(supplier, 'Supplier'),
       consumerLabel: consumer?.restaurantName ?? 'Buyer',
       deliveryAddress: order.deliveryAddress,
       lines,

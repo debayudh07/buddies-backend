@@ -127,6 +127,8 @@ kycRouter.post('/supplier/kyc/dev-verify', authenticate, requireRole('supplier')
   const userId = req.user!.id;
   const user = await prisma.user.findUnique({ where: { id: userId } });
   const existing = await prisma.supplierProfile.findUnique({ where: { userId } });
+  const { sanitizeLabel } = await import('../../lib/user-present');
+  const safeName = sanitizeLabel(user?.displayName);
   const profile = existing
     ? await prisma.supplierProfile.update({
         where: { userId },
@@ -135,11 +137,11 @@ kycRouter.post('/supplier/kyc/dev-verify', authenticate, requireRole('supplier')
     : await prisma.supplierProfile.create({
         data: {
           userId,
-          businessName: user?.displayName?.trim() || 'My shop',
-          ownerName: user?.displayName?.trim() || 'Owner',
+          businessName: safeName || 'Local supplier',
+          ownerName: safeName || 'Local supplier',
           ownerPhone: user?.phone || '+910000000000',
           shopAddressPrivate: 'Address pending',
-          publicLabel: user?.displayName?.trim() || 'Local supplier',
+          publicLabel: safeName || 'Local supplier',
           kycStatus: 'verified',
           categories: [],
         },

@@ -284,8 +284,88 @@ paths:
     post:
       tags: [supplier]
       security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [accept, dispute] }
+                resolutionType: { type: string, enum: [refund, replacement] }
+                refundAmountPaise: { type: integer }
+                pickupWindow: { type: string }
+                notes: { type: string }
       responses:
-        '200': { description: Decision recorded }
+        '200': { description: Decision recorded. Accept + pickupWindow → pickup_scheduled. }
+  /return-claims/{id}/schedule-pickup:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pickupWindow]
+              properties:
+                pickupWindow: { type: string }
+      responses:
+        '200': { description: Status pickup_scheduled }
+  /return-claims/{id}/confirm-pickup:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Status picked_up }
+  /return-claims/{id}/refund:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountPaise]
+              properties:
+                amountPaise: { type: integer, description: Offline cash/UPI amount in paise }
+                receiptRef: { type: string }
+      responses:
+        '200': { description: Offline refund recorded (status refunded) }
+  /return-claims/{id}/replaced:
+    post:
+      tags: [supplier]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Replacement delivered (status replaced) }
+  /return-claims/{id}/consumer-ack:
+    post:
+      tags: [consumer]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Closes refunded, replaced, or rejected claims }
+  /return-claims/{id}/chat:
+    get:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Per-claim chat thread + messages }
+  /return-claims/{id}/chat/messages:
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Return chat message }
+  /return-claims/{id}/chat/typing:
+    post:
+      tags: [shared]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Typing indicator }
   /returns/policy:
     get:
       tags: [shared]

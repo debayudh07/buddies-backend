@@ -9,11 +9,12 @@ import { haversineKm } from '../../lib/haversine';
 import { computeBidScore } from '../../lib/scoring';
 import { getSupplierBidCap } from '../subscriptions/service';
 import { config } from '../../config';
-import { emitAuction } from '../../socket';
+import { emitAuction, emitUser } from '../../socket';
 import { sendPush } from '../../lib/notify';
 import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/service';
 import { shelfRulesForItems } from '../../lib/product-categories';
 import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
+import { publicSupplierLabel } from '../../lib/user-present';
 
 export const bidzoneRouter = Router();
 
@@ -528,7 +529,7 @@ bidzoneRouter.post(
       void sendPush({
         userId: consumer.userId,
         title: 'New bid',
-        body: `${profile.publicLabel} bid ₹${(bidAmountPaise / 100).toFixed(0)} (active ${Math.round(config.auction.bidTtlSec / 60)} min)`,
+        body: `${publicSupplierLabel(profile)} bid ₹${(bidAmountPaise / 100).toFixed(0)} (active ${Math.round(config.auction.bidTtlSec / 60)} min)`,
         data: { bidRequestId: bidRequest.id, bidId: bid.id },
       }).catch(() => undefined);
     }
@@ -824,7 +825,15 @@ bidzoneRouter.get(
       filteredBids.sort((a, b) => b.score - a.score);
     }
 
-    res.json({ bids: filteredBids, bidTtlSec: config.auction.bidTtlSec });
+    res.json({
+      bids: filteredBids.map((b) => ({
+        ...b,
+        supplier: b.supplier
+          ? { ...b.supplier, publicLabel: publicSupplierLabel(b.supplier) }
+          : b.supplier,
+      })),
+      bidTtlSec: config.auction.bidTtlSec,
+    });
   },
 );
 
@@ -938,6 +947,16 @@ bidzoneRouter.post(
 
     emitAuction(bid.bidRequestId, 'auction.bid_accepted', { bidId: bid.id });
     emitAuction(bid.bidRequestId, 'order.created', { orderId: order.id });
+    emitUser(bid.supplier.userId, 'bid.status_changed', {
+      bidId: bid.id,
+      status: 'accepted',
+      orderId: order.id,
+    });
+    emitUser(bid.bidRequest.consumer.userId, 'bidRequest.updated', {
+      id: bid.bidRequestId,
+      status: 'awarded',
+      orderId: order.id,
+    });
     await sendPush({
       userId: bid.supplier.userId,
       title: 'You won the bid',
@@ -1137,6 +1156,16 @@ bidzoneRouter.post(
     }
 
     emitAuction(bidRequestId, 'auction.bid_accepted', { bidIds });
+    emitUser(bidRequest.consumer.userId, 'bidRequest.updated', {
+      id: bidRequestId,
+      status: 'awarded',
+    });
+    for (const winner of bidById.values()) {
+      emitUser(winner.supplier.userId, 'bid.status_changed', {
+        bidId: winner.id,
+        status: 'accepted',
+      });
+    }
 
     res.json({
       bidIds,
@@ -1151,7 +1180,7 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
   const bid = assertFound(
     await prisma.bid.findUnique({
       where: { id: requireParam(req, 'id') },
-      include: { bidRequest: { include: { consumer: true } } },
+      include: { bidRequest: { include: { consumer: true } }, supplier: true },
     }),
   );
   if (bid.bidRequest.consumer.userId !== req.user!.id) {
@@ -1165,6 +1194,10 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
   }
   const updated = await prisma.bid.update({ where: { id: bid.id }, data: { status: 'rejected' } });
   emitAuction(bid.bidRequestId, 'auction.bid_rejected', { bidId: bid.id });
+  emitUser(bid.supplier.userId, 'bid.status_changed', {
+    bidId: bid.id,
+    status: 'rejected',
+  });
   res.json({ bid: updated });
 });
 
@@ -1256,5 +1289,10 @@ bidzoneRouter.get('/suppliers/:id/performance', authenticate, async (req, res) =
       },
     }),
   );
-  res.json({ performance: profile });
+  res.json({
+    performance: {
+      ...profile,
+      publicLabel: publicSupplierLabel(profile),
+    },
+  });
 });

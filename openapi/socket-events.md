@@ -28,5 +28,13 @@ Live writes go through REST. Clients may `sendBroadcastMessage` for typing only
 | `tracking.location_updated` | `tracking:{orderId}` | `{ point, etaMinutes }` |
 | `chat.thread_created` | `chat:{threadId}` | `{ threadId, orderId }` |
 | `chat.message_created` | `chat:{threadId}` | `{ message }` |
-| `chat.typing` | `chat:{threadId}` | `{ typing, userId, orderId }` |
+| `chat.typing` | `chat:{threadId}` | `{ typing, userId, orderId }` or `{ typing, userId, claimId }` for return threads |
+| `return.updated` | `return:{claimId}`, `user:{consumerUserId}`, `user:{supplierUserId}` | `{ claim }` |
 | `notify.created` | `user:{userId}` | `{ notification }` |
+| `bid.status_changed` | `user:{supplierUserId}` | `{ bidId, status, orderId? }` |
+| `bidRequest.updated` | `user:{consumerUserId}` | `{ id, status, orderId? }` |
+
+Return-scoped chat reuses `chat.message_created` / `chat.typing` on `chat:{threadId}`.
+The thread is per-claim (`threadKind: return_claim`), not the order thread.
+Clients join the same `chat:{threadId}` room returned by `GET /return-claims/{id}/chat`.
+

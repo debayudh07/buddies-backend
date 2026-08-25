@@ -83,7 +83,8 @@ function canJoinRoom(userId: string | undefined, room: string): boolean {
   if (
     room.startsWith('auction:') ||
     room.startsWith('tracking:') ||
-    room.startsWith('chat:')
+    room.startsWith('chat:') ||
+    room.startsWith('return:')
   ) {
     return true;
   }
@@ -102,4 +103,5 @@ export {
   emitTracking,
   emitBidzone,
   emitUser,
+  emitReturn,
 } from '../lib/realtime';

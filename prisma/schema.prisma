@@ -79,7 +79,21 @@ enum ReturnClaimStatus {
   supplier_review
   approved
   rejected
+  pickup_scheduled
+  picked_up
+  refunded
+  replaced
   closed
+}
+
+enum ReturnResolution {
+  refund
+  replacement
+}
+
+enum ThreadKind {
+  order
+  return_claim
 }
 
 enum FeeAllocation {
@@ -341,7 +355,7 @@ model Order {
   offlinePayment  OfflinePayment?
   digitalChallan  DigitalChallan?
   gstInvoice      GstInvoice?
-  chatThread      ChatThread?
+  chatThreads     ChatThread[]
   trackingSession TrackingSession?
   trackingPoints  TrackingPoint[]
   returnClaims    ReturnClaim[]
@@ -451,14 +465,19 @@ model TrackingPoint {
 }
 
 model ChatThread {
-  id             String   @id @default(uuid())
-  orderId        String   @unique
+  id             String     @id @default(uuid())
+  orderId        String?
+  returnClaimId  String?    @unique
+  threadKind     ThreadKind @default(order)
   consumerUserId String
   supplierUserId String
-  createdAt      DateTime @default(now())
+  createdAt      DateTime   @default(now())
 
-  order    Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  messages ChatMessage[]
+  order       Order?        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  returnClaim ReturnClaim?  @relation(fields: [returnClaimId], references: [id], onDelete: Cascade)
+  messages    ChatMessage[]
+
+  @@unique([orderId, threadKind])
 }
 
 model ChatMessage {
@@ -477,25 +496,35 @@ model ChatMessage {
 }
 
 model ReturnClaim {
-  id              String            @id @default(uuid())
-  orderId         String
-  consumerUserId  String
-  supplierUserId  String
-  reasonCode      String
-  productCategory String
-  lineItemIds     String[]
-  notes           String?
-  windowDeadline  DateTime
-  status          ReturnClaimStatus @default(draft)
-  feeAllocation   FeeAllocation     @default(none)
-  mediatorNotes   String?
-  submittedAt     DateTime?
-  decidedAt       DateTime?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  id                 String            @id @default(uuid())
+  orderId            String
+  consumerUserId     String
+  supplierUserId     String
+  reasonCode         String
+  productCategory    String
+  lineItemIds        String[]
+  notes              String?
+  windowDeadline     DateTime
+  status             ReturnClaimStatus @default(draft)
+  feeAllocation      FeeAllocation     @default(none)
+  mediatorNotes      String?
+  resolutionType     ReturnResolution?
+  refundAmountPaise  Int?
+  refundReceiptRef   String?
+  refundReceivedAt   DateTime?
+  pickupScheduledAt  DateTime?
+  pickupWindow       String?
+  pickedUpAt         DateTime?
+  replacedAt         DateTime?
+  closedAt           DateTime?
+  submittedAt        DateTime?
+  decidedAt          DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
-  order    Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  evidence ReturnEvidence[]
+  order      Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  evidence   ReturnEvidence[]
+  chatThread ChatThread?
 
   @@index([consumerUserId, createdAt])
   @@index([supplierUserId, createdAt, status])

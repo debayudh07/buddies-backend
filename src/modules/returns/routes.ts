@@ -6,9 +6,16 @@ import { authenticate, requireRole } from '../../middleware/auth';
 import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
-import { sendPush } from '../../lib/notify';
 import { uploadBuffer } from '../../lib/storage';
-import { bumpReturnRate } from '../orders/service';
+import {
+  applySupplierDecision,
+  consumerAck,
+  confirmPickup,
+  confirmReplaced,
+  emitSubmitted,
+  recordRefund,
+  schedulePickup,
+} from './service';
 
 export const returnsRouter = Router();
 
@@ -280,12 +287,7 @@ returnsRouter.post('/return-claims/:id/submit', authenticate, requireRole('consu
     },
   });
 
-  await sendPush({
-    userId: claim.supplierUserId,
-    title: 'Return claim for review',
-    body: claim.reasonCode,
-    data: { claimId: claim.id },
-  });
+  await emitSubmitted(updated);
 
   res.json({ claim: updated });
 });
@@ -321,7 +323,18 @@ returnsRouter.get('/supplier/return-claims', authenticate, requireRole('supplier
     where: {
       supplierUserId: req.user!.id,
       status: {
-        in: ['supplier_review', 'submitted', 'auto_approved', 'approved', 'rejected', 'closed'],
+        in: [
+          'supplier_review',
+          'submitted',
+          'auto_approved',
+          'approved',
+          'rejected',
+          'pickup_scheduled',
+          'picked_up',
+          'refunded',
+          'replaced',
+          'closed',
+        ],
       },
     },
     include: {
@@ -343,34 +356,82 @@ returnsRouter.post(
       decision: z.enum(['accept', 'dispute']),
       coldChainLogRef: z.string().optional(),
       notes: z.string().optional(),
+      resolutionType: z.enum(['refund', 'replacement']).optional(),
+      refundAmountPaise: z.number().int().positive().optional(),
+      pickupWindow: z.string().min(1).optional(),
     }),
   ),
   async (req, res) => {
     const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
     if (claim.supplierUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
-    if (claim.status !== 'supplier_review') {
-      throw new AppError(400, 'INVALID_STATE', 'Not awaiting supplier review');
-    }
+    const updated = await applySupplierDecision(claim, req.body);
+    res.json({ claim: updated });
+  },
+);
 
-    const accepted = req.body.decision === 'accept';
-    const updated = await prisma.returnClaim.update({
-      where: { id: claim.id },
-      data: {
-        status: accepted ? 'approved' : 'rejected',
-        decidedAt: new Date(),
-        feeAllocation: accepted ? 'supplier_bears_reverse' : 'none',
-        mediatorNotes: req.body.notes,
-      },
-    });
-    if (accepted) await bumpReturnRate(claim.supplierUserId, true);
+returnsRouter.post(
+  '/return-claims/:id/schedule-pickup',
+  authenticate,
+  requireRole('supplier'),
+  validateBody(z.object({ pickupWindow: z.string().min(1) })),
+  async (req, res) => {
+    const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
+    if (claim.supplierUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
+    const updated = await schedulePickup(claim, req.body.pickupWindow);
+    res.json({ claim: updated });
+  },
+);
 
-    await sendPush({
-      userId: claim.consumerUserId,
-      title: accepted ? 'Return approved' : 'Return disputed/rejected',
-      body: req.body.notes ?? req.body.decision,
-      data: { claimId: claim.id },
-    });
+returnsRouter.post(
+  '/return-claims/:id/confirm-pickup',
+  authenticate,
+  requireRole('supplier'),
+  async (req, res) => {
+    const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
+    if (claim.supplierUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
+    const updated = await confirmPickup(claim);
+    res.json({ claim: updated });
+  },
+);
 
+returnsRouter.post(
+  '/return-claims/:id/refund',
+  authenticate,
+  requireRole('supplier'),
+  validateBody(
+    z.object({
+      amountPaise: z.number().int().positive(),
+      receiptRef: z.string().optional(),
+    }),
+  ),
+  async (req, res) => {
+    const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
+    if (claim.supplierUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
+    const updated = await recordRefund(claim, req.body);
+    res.json({ claim: updated });
+  },
+);
+
+returnsRouter.post(
+  '/return-claims/:id/replaced',
+  authenticate,
+  requireRole('supplier'),
+  async (req, res) => {
+    const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
+    if (claim.supplierUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
+    const updated = await confirmReplaced(claim);
+    res.json({ claim: updated });
+  },
+);
+
+returnsRouter.post(
+  '/return-claims/:id/consumer-ack',
+  authenticate,
+  requireRole('consumer'),
+  async (req, res) => {
+    const claim = assertFound(await prisma.returnClaim.findUnique({ where: { id: requireParam(req, 'id') } }));
+    if (claim.consumerUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not yours');
+    const updated = await consumerAck(claim);
     res.json({ claim: updated });
   },
 );

@@ -9,10 +9,14 @@ function orderCode() {
 }
 
 const orderInclude = {
-  chatThread: true,
+  chatThreads: { where: { threadKind: 'order' as const } },
   offlinePayment: true,
   digitalChallan: true,
 } as const;
+
+function primaryChat<T extends { chatThreads?: Array<{ id: string }> }>(order: T) {
+  return order.chatThreads?.[0] ?? null;
+}
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -75,8 +79,9 @@ async function insertOrderFromBid(
         },
       },
       offlinePayment: { create: { status: 'not_started' } },
-      chatThread: {
+      chatThreads: {
         create: {
+          threadKind: 'order',
           consumerUserId: consumer.userId,
           supplierUserId: bid.supplier.userId,
         },
@@ -143,28 +148,36 @@ export async function createOrderFromAcceptedBid(bidId: string, opts?: AwardOrde
       ? await insertOrderFromBid(opts.tx, bid, coveredItemIds)
       : await prisma.$transaction(async (tx) => insertOrderFromBid(tx, bid, coveredItemIds));
 
-    if (emitRealtime && order.chatThread) {
-      emitChat(order.chatThread.id, 'chat.thread_created', {
-        threadId: order.chatThread.id,
-        orderId: order.id,
-      });
+    if (emitRealtime) {
+      const thread = primaryChat(order);
+      if (thread) {
+        emitChat(thread.id, 'chat.thread_created', {
+          threadId: thread.id,
+          orderId: order.id,
+        });
+      }
     }
 
-    return order;
+    return { ...order, chatThread: primaryChat(order) };
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code;
     if (code === 'P2002') {
       const recovered = await db.order.findUnique({ where: { bidId }, include: orderInclude });
-      if (recovered) return recovered;
+      if (recovered) return { ...recovered, chatThread: primaryChat(recovered) };
     }
     throw e;
   }
 }
 
-export function emitOrderChatCreated(order: { id: string; chatThread?: { id: string } | null }) {
-  if (!order.chatThread) return;
-  emitChat(order.chatThread.id, 'chat.thread_created', {
-    threadId: order.chatThread.id,
+export function emitOrderChatCreated(order: {
+  id: string;
+  chatThread?: { id: string } | null;
+  chatThreads?: Array<{ id: string }>;
+}) {
+  const thread = order.chatThread ?? primaryChat(order);
+  if (!thread) return;
+  emitChat(thread.id, 'chat.thread_created', {
+    threadId: thread.id,
     orderId: order.id,
   });
 }
