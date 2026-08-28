@@ -19,6 +19,7 @@ import {
   type CanonicalLine,
   type IncomingCatalogLine,
 } from '../../lib/product-catalog';
+import { invalidateBidzoneFeeds, invalidateConsumerLists, cacheGet, cacheSet } from '../../lib/response-cache';
 
 const knownCategory = z
   .string()
@@ -245,6 +246,10 @@ demandRouter.post(
       )
       .catch(() => undefined);
 
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateConsumerLists(req.user!.id),
+    ]);
     res.status(201).json({ bidRequest });
   },
 );
@@ -254,6 +259,13 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
     Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1),
     50,
   );
+  const cacheKey = `demand:list:${req.user!.id}:${take}`;
+  const cached = await cacheGet<{ bidRequests: unknown }>(cacheKey);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
   // One query via nested relation — skip sequential consumerProfile.findUnique.
   const bidRequests = await prisma.bidRequest.findMany({
     where: { consumer: { userId: req.user!.id } },
@@ -321,7 +333,10 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
     orderBy: { createdAt: 'desc' },
     take,
   });
-  res.json({ bidRequests });
+  const payload = { bidRequests };
+  await cacheSet(cacheKey, payload, 8_000);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) => {
@@ -526,6 +541,10 @@ demandRouter.patch(
     });
 
     const itemsPolicy = itemsEditPolicy(updated.createdAt, new Date());
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateConsumerLists(req.user!.id),
+    ]);
     res.json({
       bidRequest: {
         ...updated,
@@ -605,6 +624,10 @@ demandRouter.post(
       status: 'cancelled',
     });
 
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateConsumerLists(req.user!.id),
+    ]);
     res.json({ bidRequest: updated, message: 'Bid request cancelled' });
   },
 );
@@ -658,6 +681,10 @@ demandRouter.post(
     });
 
     emitAuction(bidRequest.id, 'demand.reordered', { id: bidRequest.id });
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateConsumerLists(req.user!.id),
+    ]);
     res.status(201).json({ bidRequest });
   },
 );

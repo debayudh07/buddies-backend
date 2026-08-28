@@ -1,7 +1,9 @@
 /**
- * Tiny process-local TTL cache for expensive GET responses.
- * Cuts repeat Tokyo Prisma trips when the app reopens the same view quickly.
+ * L1 process-local TTL + L2 Redis for expensive GET responses.
+ * Redis miss / missing REDIS_URL still uses memory so a single instance stays fast.
  */
+import { redisDelPrefix, redisGet, redisSet } from './redis';
+
 type Entry = { exp: number; body: unknown };
 
 const store = new Map<string, Entry>();
@@ -28,4 +30,48 @@ export function responseCacheInvalidate(prefix: string): void {
   for (const k of store.keys()) {
     if (k.startsWith(prefix)) store.delete(k);
   }
+}
+
+export async function cacheGet<T = unknown>(key: string): Promise<T | null> {
+  const mem = responseCacheGet<T>(key);
+  if (mem != null) return mem;
+  const raw = await redisGet(key);
+  if (!raw) return null;
+  try {
+    const body = JSON.parse(raw) as T;
+    responseCacheSet(key, body, 2_000);
+    return body;
+  } catch {
+    return null;
+  }
+}
+
+export async function cacheSet(key: string, body: unknown, ttlMs: number): Promise<void> {
+  responseCacheSet(key, body, ttlMs);
+  const ttlSec = Math.max(1, Math.ceil(ttlMs / 1000));
+  await redisSet(key, JSON.stringify(body), ttlSec);
+}
+
+export async function cacheInvalidate(prefix: string): Promise<void> {
+  responseCacheInvalidate(prefix);
+  await redisDelPrefix(prefix);
+}
+
+export async function invalidateBidzoneFeeds() {
+  await cacheInvalidate('bidzone:feed:');
+}
+
+export async function invalidateConsumerLists(userId: string) {
+  await Promise.all([
+    cacheInvalidate(`dash:consumer:${userId}`),
+    cacheInvalidate(`demand:list:${userId}`),
+    cacheInvalidate(`orders:consumer:${userId}`),
+  ]);
+}
+
+export async function invalidateSupplierLists(userId: string) {
+  await Promise.all([
+    cacheInvalidate(`bidzone:feed:${userId}`),
+    cacheInvalidate(`orders:supplier:${userId}`),
+  ]);
 }

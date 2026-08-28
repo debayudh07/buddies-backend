@@ -19,6 +19,10 @@ import {
   responseCacheGet,
   responseCacheInvalidate,
   responseCacheSet,
+  cacheGet,
+  cacheSet,
+  invalidateConsumerLists,
+  invalidateSupplierLists,
 } from '../../lib/response-cache';
 import {
   consumerPublicRating,
@@ -86,6 +90,8 @@ function notifyOrderUpdated(
   emitUser(order.consumerUserId, 'order.updated', payload);
   emitUser(order.supplierUserId, 'order.updated', payload);
   invalidateOrderCaches(order.id);
+  void invalidateConsumerLists(order.consumerUserId);
+  void invalidateSupplierLists(order.supplierUserId);
   if (opts.push) {
     void sendPush({
       userId: opts.push.userId,
@@ -323,24 +329,44 @@ function presentOrder<T extends {
 
 ordersRouter.get('/consumer/orders', authenticate, requireRole('consumer'), async (req, res) => {
   const take = parseLimit(req.query.limit, { defaultLimit: 20, max: 50 });
+  const cacheKey = `orders:consumer:${req.user!.id}:${take}`;
+  const cached = await cacheGet<{ orders: unknown }>(cacheKey);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
   const orders = await prisma.order.findMany({
     where: { consumerUserId: req.user!.id },
     orderBy: { createdAt: 'desc' },
     take,
     include: listOrderInclude,
   });
-  res.json({ orders: orders.map(presentOrder) });
+  const payload = { orders: orders.map(presentOrder) };
+  await cacheSet(cacheKey, payload, 8_000);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 ordersRouter.get('/supplier/orders', authenticate, requireRole('supplier'), async (req, res) => {
   const take = parseLimit(req.query.limit, { defaultLimit: 20, max: 50 });
+  const cacheKey = `orders:supplier:${req.user!.id}:${take}`;
+  const cached = await cacheGet<{ orders: unknown }>(cacheKey);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
   const orders = await prisma.order.findMany({
     where: { supplierUserId: req.user!.id },
     orderBy: { createdAt: 'desc' },
     take,
     include: listOrderInclude,
   });
-  res.json({ orders: orders.map(presentOrder) });
+  const payload = { orders: orders.map(presentOrder) };
+  await cacheSet(cacheKey, payload, 8_000);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 ordersRouter.get('/orders/:id', authenticate, async (req, res) => {

@@ -15,6 +15,7 @@ import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/serv
 import { shelfRulesForItems } from '../../lib/product-categories';
 import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 import { publicSupplierLabel } from '../../lib/user-present';
+import { cacheGet, cacheSet, invalidateBidzoneFeeds, invalidateSupplierLists, invalidateConsumerLists } from '../../lib/response-cache';
 
 export const bidzoneRouter = Router();
 
@@ -38,6 +39,26 @@ function isBidStillLive(bid: {
   if (bid.status !== 'active') return false;
   if (bid.expiresAt && bid.expiresAt.getTime() <= Date.now()) return false;
   return true;
+}
+
+/** Mirror an order onto both user rooms so My Bids / Orders lists upsert without auction join. */
+function emitOrderCreatedToParties(order: {
+  id: string;
+  status: string;
+  consumerUserId: string;
+  supplierUserId: string;
+}) {
+  const payload = {
+    orderId: order.id,
+    status: order.status,
+    paymentStatus: null as string | null,
+    reason: null as string | null,
+    at: Date.now(),
+  };
+  emitUser(order.consumerUserId, 'order.created', payload);
+  emitUser(order.supplierUserId, 'order.created', payload);
+  emitUser(order.consumerUserId, 'order.updated', payload);
+  emitUser(order.supplierUserId, 'order.updated', payload);
 }
 
 async function requireVerifiedSupplier(userId: string) {
@@ -165,6 +186,13 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
 });
 
 bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), async (req, res) => {
+  const cacheKey = `bidzone:feed:${req.user!.id}`;
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
   // Browse is open to all suppliers; placing a bid still requires verified KYC.
   const profile = await prisma.supplierProfile.findUnique({
     where: { userId: req.user!.id },
@@ -243,7 +271,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
   });
 
   const remaining = Math.max(0, bidCap - activeBidCount);
-  res.json({
+  const payload = {
     feed,
     kycStatus: profile?.kycStatus ?? 'draft',
     canBid: profile?.kycStatus === 'verified' && remaining > 0,
@@ -253,7 +281,10 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       remaining,
     },
     categories: profile?.categories ?? [],
-  });
+  };
+  await cacheSet(cacheKey, payload, 8_000);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 const placeBidSchema = z.object({
@@ -523,8 +554,18 @@ bidzoneRouter.post(
       bidExpiresAt,
       bidTtlSec: config.auction.bidTtlSec,
     });
+    emitUser(profile.userId, 'bid.status_changed', {
+      bidId: bid.id,
+      status: 'active',
+      bidRequestId: bidRequest.id,
+    });
 
     const consumer = await prisma.consumerProfile.findUnique({ where: { id: bidRequest.consumerId } });
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateSupplierLists(profile.userId),
+      consumer ? invalidateConsumerLists(consumer.userId) : Promise.resolve(),
+    ]);
     if (consumer) {
       void sendPush({
         userId: consumer.userId,
@@ -736,6 +777,15 @@ bidzoneRouter.post('/supplier/bids/:id/withdraw', authenticate, requireRole('sup
     data: { status: 'withdrawn' },
   });
   emitAuction(bid.bidRequestId, 'auction.bid_withdrawn', { bidId: bid.id });
+  emitUser(profile.userId, 'bid.status_changed', {
+    bidId: bid.id,
+    status: 'withdrawn',
+    bidRequestId: bid.bidRequestId,
+  });
+  await Promise.all([
+    invalidateBidzoneFeeds(),
+    invalidateSupplierLists(profile.userId),
+  ]);
   res.json({ bid: updated });
 });
 
@@ -947,6 +997,7 @@ bidzoneRouter.post(
 
     emitAuction(bid.bidRequestId, 'auction.bid_accepted', { bidId: bid.id });
     emitAuction(bid.bidRequestId, 'order.created', { orderId: order.id });
+    emitOrderCreatedToParties(order);
     emitUser(bid.supplier.userId, 'bid.status_changed', {
       bidId: bid.id,
       status: 'accepted',
@@ -963,6 +1014,12 @@ bidzoneRouter.post(
       body: `Order ${order.orderCode} is ready — open it to chat and start preparing.`,
       data: { bidId: bid.id, orderId: order.id },
     });
+
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateSupplierLists(bid.supplier.userId),
+      invalidateConsumerLists(bid.bidRequest.consumer.userId),
+    ]);
 
     res.json({
       bidId: bid.id,
@@ -1144,6 +1201,7 @@ bidzoneRouter.post(
     for (const order of orders) {
       emitOrderChatCreated(order);
       emitAuction(bidRequestId, 'order.created', { orderId: order.id });
+      emitOrderCreatedToParties(order);
       const winner = [...bidById.values()].find((b) => b.id === order.bidId);
       if (winner) {
         await sendPush({
@@ -1166,6 +1224,12 @@ bidzoneRouter.post(
         status: 'accepted',
       });
     }
+
+    await Promise.all([
+      invalidateBidzoneFeeds(),
+      invalidateConsumerLists(bidRequest.consumer.userId),
+      ...[...bidById.values()].map((w) => invalidateSupplierLists(w.supplier.userId)),
+    ]);
 
     res.json({
       bidIds,
@@ -1198,6 +1262,11 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
     bidId: bid.id,
     status: 'rejected',
   });
+  await Promise.all([
+    invalidateBidzoneFeeds(),
+    invalidateSupplierLists(bid.supplier.userId),
+    invalidateConsumerLists(req.user!.id),
+  ]);
   res.json({ bid: updated });
 });
 
@@ -1248,6 +1317,7 @@ bidzoneRouter.post(
     if (refreshed?.consumerAckAt && !refreshed.order) {
       const order = await createOrderFromAcceptedBid(refreshed.id);
       emitAuction(bid.bidRequestId, 'order.created', { orderId: order.id });
+      emitOrderCreatedToParties(order);
       return res.json({
         acknowledged: true,
         order,

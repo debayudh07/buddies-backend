@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../../lib/prisma';
 import { authenticate, requireRole } from '../../middleware/auth';
-import { responseCacheGet, responseCacheSet } from '../../lib/response-cache';
+import { cacheGet, cacheSet } from '../../lib/response-cache';
 import { PRODUCT_CATEGORIES } from '../../lib/product-categories';
 
 export const dashboardRouter = Router();
@@ -11,15 +11,21 @@ const PRODUCT_CATEGORY_SLUGS = PRODUCT_CATEGORIES.map((c) => c.productCategory);
 const FALLBACK_CATEGORIES = PRODUCT_CATEGORY_SLUGS;
 const DASHBOARD_TTL_MS = 20_000;
 
+function startOfMonth(now = new Date()) {
+  return new Date(now.getFullYear(), now.getMonth(), 1);
+}
+
 dashboardRouter.get('/consumer/dashboard', authenticate, requireRole('consumer'), async (req, res) => {
   const userId = req.user!.id;
   const cacheKey = `dash:consumer:${userId}`;
-  const cached = responseCacheGet<Record<string, unknown>>(cacheKey);
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey);
   if (cached) {
     res.setHeader('X-Cache', 'HIT');
     res.json(cached);
     return;
   }
+
+  const monthStart = startOfMonth();
 
   // Single round: all queries keyed by userId / nested consumer relation (no serial profile).
   const [recentOrders, openBidRequests, totalOrders, closedOrders, subscription] =
@@ -58,8 +64,11 @@ dashboardRouter.get('/consumer/dashboard', authenticate, requireRole('consumer')
         where: {
           consumerUserId: userId,
           status: { in: ['delivered', 'closed', 'challan_signed'] },
+          OR: [
+            { deliveredAt: { gte: monthStart } },
+            { deliveredAt: null, createdAt: { gte: monthStart } },
+          ],
         },
-        take: 30,
         select: {
           bid: { select: { amountPaise: true } },
           bidRequest: {
@@ -89,7 +98,7 @@ dashboardRouter.get('/consumer/dashboard', authenticate, requireRole('consumer')
   for (const order of closedOrders) {
     const paid = order.bid.amountPaise;
     const budget = order.bidRequest.budgetPaise;
-    if (budget != null && budget > paid) savingsPaise += budget - paid;
+    if (budget != null) savingsPaise += budget - paid;
 
     const category = order.bidRequest.items[0]?.productCategory ?? 'General';
     spendingByCategory[category] = (spendingByCategory[category] ?? 0) + paid;
@@ -108,7 +117,7 @@ dashboardRouter.get('/consumer/dashboard', authenticate, requireRole('consumer')
     categories: FALLBACK_CATEGORIES,
   };
 
-  responseCacheSet(cacheKey, payload, DASHBOARD_TTL_MS);
+  await cacheSet(cacheKey, payload, DASHBOARD_TTL_MS);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);
 });

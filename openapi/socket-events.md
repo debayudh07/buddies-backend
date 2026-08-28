@@ -22,7 +22,7 @@ Live writes go through REST. Clients may `sendBroadcastMessage` for typing only
 | `auction.bid_withdrawn` | `auction:{bidRequestId}` | `{ bidId }` |
 | `auction.bid_accepted` | `auction:{bidRequestId}` | `{ bidId }` or `{ bidIds }` |
 | `auction.bid_rejected` | `auction:{bidRequestId}` | `{ bidId }` |
-| `order.created` | `auction:{bidRequestId}` | `{ orderId }` |
+| `order.created` | `auction:{bidRequestId}`, `user:{consumerId}`, `user:{supplierId}` | auction: `{ orderId }`; user rooms: `{ orderId, status, paymentStatus?, reason?, at }` |
 | `order.status_changed` | `tracking:{orderId}` | `{ orderId, status, paymentStatus?, reason?, at }` |
 | `order.updated` | `tracking:{orderId}`, `user:{consumerId}`, `user:{supplierId}` | same payload |
 | `tracking.location_updated` | `tracking:{orderId}` | `{ point, etaMinutes }` |
@@ -31,7 +31,7 @@ Live writes go through REST. Clients may `sendBroadcastMessage` for typing only
 | `chat.typing` | `chat:{threadId}` | `{ typing, userId, orderId }` or `{ typing, userId, claimId }` for return threads |
 | `return.updated` | `return:{claimId}`, `user:{consumerUserId}`, `user:{supplierUserId}` | `{ claim }` |
 | `notify.created` | `user:{userId}` | `{ notification }` |
-| `bid.status_changed` | `user:{supplierUserId}` | `{ bidId, status, orderId? }` |
+| `bid.status_changed` | `user:{supplierUserId}` | `{ bidId, status, bidRequestId?, orderId? }` — also on place (`active`) and withdraw |
 | `bidRequest.updated` | `user:{consumerUserId}` | `{ id, status, orderId? }` |
 
 Return-scoped chat reuses `chat.message_created` / `chat.typing` on `chat:{threadId}`.

@@ -163,6 +163,22 @@ export async function redisSet(key: string, value: string, ttlSec?: number): Pro
   }
 }
 
+export async function redisDelPrefix(prefix: string): Promise<void> {
+  const r = await readyClient();
+  if (!r) return;
+  try {
+    let cursor = '0';
+    do {
+      const [next, keys] = await r.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 80);
+      cursor = next;
+      if (keys.length > 0) await r.del(...keys);
+    } while (cursor !== '0');
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    logger.warn('redis', 'DEL prefix failed', { prefix, error: lastError });
+  }
+}
+
 export async function redisPing(): Promise<boolean> {
   const r = await readyClient();
   if (!r) return false;
