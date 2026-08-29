@@ -47,7 +47,7 @@ export async function broadcastClaim(claim: ReturnClaim, title: string, body: st
     userId: toUserId,
     title,
     body,
-    data: { claimId: claim.id },
+    data: { claimId: claim.id, type: 'return' },
   }).catch(() => undefined);
 }
 

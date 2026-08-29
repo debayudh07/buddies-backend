@@ -42,26 +42,12 @@ export function initFirebase(): boolean {
     }
 
     const credJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-    const credPathRaw = process.env.FIREBASE_SERVICE_ACCOUNT_PATH ?? config.firebaseServiceAccountPath;
+    const credPathRaw =
+      process.env.FIREBASE_SERVICE_ACCOUNT_PATH ?? config.firebaseServiceAccountPath;
     const credPath = credPathRaw ? resolveCredentialPath(credPathRaw) : '';
 
-    if (credJson) {
-      const parsed = JSON.parse(credJson) as {
-        project_id?: string;
-        client_email?: string;
-        private_key?: string;
-      };
-      app = initializeApp({
-        credential: cert({
-          projectId: parsed.project_id,
-          clientEmail: parsed.client_email,
-          privateKey: parsed.private_key,
-        }),
-      });
-      logger.info('fcm', 'initialized from FIREBASE_SERVICE_ACCOUNT_JSON', {
-        projectId: parsed.project_id,
-      });
-    } else if (credPath && fs.existsSync(credPath)) {
+    const fromFile = credPath && fs.existsSync(credPath);
+    if (fromFile) {
       const parsed = JSON.parse(fs.readFileSync(credPath, 'utf8')) as {
         project_id?: string;
         client_email?: string;
@@ -76,6 +62,22 @@ export function initFirebase(): boolean {
       });
       logger.info('fcm', 'initialized from service account file', {
         path: credPath,
+        projectId: parsed.project_id,
+      });
+    } else if (credJson) {
+      const parsed = JSON.parse(credJson) as {
+        project_id?: string;
+        client_email?: string;
+        private_key?: string;
+      };
+      app = initializeApp({
+        credential: cert({
+          projectId: parsed.project_id,
+          clientEmail: parsed.client_email,
+          privateKey: parsed.private_key,
+        }),
+      });
+      logger.info('fcm', 'initialized from FIREBASE_SERVICE_ACCOUNT_JSON', {
         projectId: parsed.project_id,
       });
     } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -102,23 +104,42 @@ export function isFirebaseReady(): boolean {
   return app !== null || (initAttempted && getApps().length > 0);
 }
 
-async function persistInbox(payload: NotifyPayload) {
-  const type =
-    payload.type ??
-    payload.data?.type ??
-    (payload.data?.orderId ? 'order' : payload.data?.bidRequestId ? 'bid' : 'general');
+export function inferNotifyType(payload: NotifyPayload): string {
+  if (payload.type) return payload.type;
+  if (payload.data?.type) return payload.data.type;
+  if (payload.data?.threadId) return 'chat';
+  if (payload.data?.claimId) return 'return';
+  if (payload.data?.ticketId) return 'support';
+  if (payload.data?.orderId) return 'order';
+  if (payload.data?.bidRequestId || payload.data?.bidId) return 'bid';
+  return 'general';
+}
+
+async function prefsAllow(userId: string, type: string): Promise<boolean> {
+  try {
+    const prefsDelegate = (prisma as { userPreference?: typeof prisma.userPreference })
+      .userPreference;
+    if (!prefsDelegate) return true;
+    const prefs = await prefsDelegate.findUnique({ where: { userId } });
+    if (!prefs) return true;
+    if (!prefs.pushEnabled && !prefs.bidAlerts && !prefs.orderAlerts) return false;
+    if (type === 'bid' && !prefs.bidAlerts) return false;
+    if ((type === 'order' || type === 'chat') && !prefs.orderAlerts && !prefs.pushEnabled) {
+      return false;
+    }
+    if (!prefs.pushEnabled && type !== 'bid' && type !== 'order' && type !== 'chat') {
+      return false;
+    }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+async function persistInbox(payload: NotifyPayload & { type: string; data: Record<string, string> }) {
+  const type = payload.type;
 
   try {
-    // Prefer optional access — stale Prisma clients (pre-generate) lack these delegates.
-    const prefsDelegate = (prisma as { userPreference?: typeof prisma.userPreference }).userPreference;
-    if (prefsDelegate) {
-      const prefs = await prefsDelegate.findUnique({ where: { userId: payload.userId } });
-      if (prefs) {
-        if (!prefs.pushEnabled && !prefs.bidAlerts && !prefs.orderAlerts) return null;
-        if (type === 'bid' && !prefs.bidAlerts) return null;
-        if (type === 'order' && !prefs.orderAlerts) return null;
-      }
-    }
 
     const notificationDelegate = (prisma as { notification?: typeof prisma.notification }).notification;
     if (!notificationDelegate) {
@@ -151,7 +172,19 @@ async function persistInbox(payload: NotifyPayload) {
 
 /** Persist in-app notification, then send FCM when enabled. */
 export async function sendPush(payload: NotifyPayload): Promise<void> {
-  await persistInbox(payload);
+  const type = inferNotifyType(payload);
+  const data: Record<string, string> = { ...(payload.data ?? {}), type };
+  const allowed = await prefsAllow(payload.userId, type);
+  if (!allowed) {
+    logger.debug('fcm', 'skipped by user prefs', {
+      userId: payload.userId,
+      type,
+      title: payload.title,
+    });
+    return;
+  }
+
+  await persistInbox({ ...payload, type, data });
 
   if (!config.fcmEnabled) {
     logger.debug('fcm', 'stub (disabled)', {
@@ -162,10 +195,15 @@ export async function sendPush(payload: NotifyPayload): Promise<void> {
   }
 
   const ready = initFirebase();
-  const tokens = await prisma.deviceToken.findMany({
+  const stored = await prisma.deviceToken.findMany({
     where: { userId: payload.userId },
     select: { id: true, token: true },
   });
+  const fallbackIds = stored.filter((t) => t.token.startsWith('fallback:')).map((t) => t.id);
+  if (fallbackIds.length) {
+    await prisma.deviceToken.deleteMany({ where: { id: { in: fallbackIds } } });
+  }
+  const tokens = stored.filter((t) => !t.token.startsWith('fallback:'));
 
   if (tokens.length === 0) {
     // Normal on simulators / installs that never registered FCM — don't spam info logs.
@@ -188,7 +226,7 @@ export async function sendPush(payload: NotifyPayload): Promise<void> {
       title: payload.title,
       body: payload.body,
     },
-    data: payload.data,
+    data,
     android: { priority: 'high' },
     apns: { payload: { aps: { sound: 'default' } } },
   };

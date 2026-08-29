@@ -19,7 +19,7 @@ import {
   type CanonicalLine,
   type IncomingCatalogLine,
 } from '../../lib/product-catalog';
-import { invalidateBidzoneFeeds, invalidateConsumerLists, cacheGet, cacheSet } from '../../lib/response-cache';
+import { invalidateBidzoneFeeds, invalidateConsumerLists, invalidateDemandDetail, cacheGet, cacheSet } from '../../lib/response-cache';
 
 const knownCategory = z
   .string()
@@ -241,7 +241,7 @@ demandRouter.post(
           suppliers.map((s) => s.userId),
           'New Bidzone demand',
           `Batch ${bidRequest.batchCode} is open nearby`,
-          { bidRequestId: bidRequest.id },
+          { bidRequestId: bidRequest.id, type: 'bid' },
         ),
       )
       .catch(() => undefined);
@@ -340,9 +340,17 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
 });
 
 demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) => {
+  const id = requireParam(req, 'id');
+  const cacheKey = `demand:detail:${id}:${req.user!.id}`;
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
   const bidRequest = assertFound(
     await prisma.bidRequest.findUnique({
-      where: { id: requireParam(req, 'id') },
+      where: { id },
       include: {
         consumer: { select: { userId: true } },
         items: true,
@@ -414,7 +422,7 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
   });
 
   const itemsPolicy = itemsEditPolicy(bidRequest.createdAt, now);
-  res.json({
+  const payload = {
     bidRequest: {
       ...rest,
       bids: (rest.bids ?? []).map((b) =>
@@ -437,7 +445,10 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
           itemsPolicy.canEditItems,
       },
     },
-  });
+  };
+  await cacheSet(cacheKey, payload, 15_000);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 /** Patch open RFQ: address / delivery window anytime while open; items only for 30s. */
@@ -544,6 +555,7 @@ demandRouter.patch(
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(req.user!.id),
+      invalidateDemandDetail(id),
     ]);
     res.json({
       bidRequest: {
@@ -627,6 +639,7 @@ demandRouter.post(
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(req.user!.id),
+      invalidateDemandDetail(id),
     ]);
     res.json({ bidRequest: updated, message: 'Bid request cancelled' });
   },

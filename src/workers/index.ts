@@ -66,7 +66,7 @@ export async function tickSlaBreach(): Promise<WorkerTickResult> {
       userId: o.supplierUserId,
       title: 'SLA breached',
       body: `Order ${o.orderCode} missed same-day deadline`,
-      data: { orderId: o.id },
+      data: { orderId: o.id, type: 'order' },
     });
   }
   if (late.length) logger.info('worker', 'SLA breaches', { count: late.length });
@@ -102,13 +102,13 @@ export async function tickTrackingStale(): Promise<WorkerTickResult> {
       userId: s.order.consumerUserId,
       title: 'Tracking delayed',
       body: 'Rider location has not updated recently',
-      data: { orderId: s.orderId },
+      data: { orderId: s.orderId, type: 'order' },
     }).catch(() => undefined);
     void sendPush({
       userId: s.order.supplierUserId,
       title: 'Enable GPS',
       body: 'Your tracking stream looks stale',
-      data: { orderId: s.orderId },
+      data: { orderId: s.orderId, type: 'order' },
     }).catch(() => undefined);
   }
   if (notified) logger.info('worker', 'stale tracking sessions', { count: notified });

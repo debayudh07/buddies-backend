@@ -73,5 +73,24 @@ export async function invalidateSupplierLists(userId: string) {
   await Promise.all([
     cacheInvalidate(`bidzone:feed:${userId}`),
     cacheInvalidate(`orders:supplier:${userId}`),
+    cacheInvalidate(`supplier:bids:${userId}`),
+  ]);
+}
+
+export async function invalidateDemandDetail(bidRequestId: string) {
+  await Promise.all([
+    cacheInvalidate(`demand:detail:${bidRequestId}:`),
+    cacheInvalidate(`demand:bids:${bidRequestId}:`),
+  ]);
+}
+
+export async function invalidateSupplierBids(userId: string) {
+  await cacheInvalidate(`supplier:bids:${userId}`);
+}
+
+export async function invalidateOrderCaches(orderId: string) {
+  await Promise.all([
+    cacheInvalidate(`order:detail:${orderId}:`),
+    cacheInvalidate(`order:challan:${orderId}:`),
   ]);
 }

@@ -62,5 +62,7 @@ export const config = {
   trackingStaleSec: Number(process.env.TRACKING_STALE_SEC ?? 120),
   /** Push only — Auth/DB stay on Supabase. Uses firebase-admin → FCM. */
   fcmEnabled: process.env.FCM_ENABLED === 'true',
-  firebaseServiceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT_PATH ?? '',
+  firebaseServiceAccountPath:
+    process.env.FIREBASE_SERVICE_ACCOUNT_PATH ??
+    './secrets/firebase-service-account.json',
 };

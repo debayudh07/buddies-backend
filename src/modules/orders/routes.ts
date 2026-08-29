@@ -16,13 +16,11 @@ import { buildInvoicePdf } from '../../lib/invoice-pdf';
 import { parseLimit } from '../../lib/pagination';
 import { publicSupplierLabel } from '../../lib/user-present';
 import {
-  responseCacheGet,
-  responseCacheInvalidate,
-  responseCacheSet,
   cacheGet,
   cacheSet,
   invalidateConsumerLists,
   invalidateSupplierLists,
+  invalidateOrderCaches,
 } from '../../lib/response-cache';
 import {
   consumerPublicRating,
@@ -35,11 +33,6 @@ export const ordersRouter = Router();
 
 const ORDER_DETAIL_TTL_MS = 15_000;
 const CHALLAN_TTL_MS = 15_000;
-
-function invalidateOrderCaches(orderId: string) {
-  responseCacheInvalidate(`order:detail:${orderId}:`);
-  responseCacheInvalidate(`order:challan:${orderId}:`);
-}
 
 type OrderStatus =
   | 'bid_accepted'
@@ -89,7 +82,7 @@ function notifyOrderUpdated(
   emitTracking(order.id, 'order.updated', payload);
   emitUser(order.consumerUserId, 'order.updated', payload);
   emitUser(order.supplierUserId, 'order.updated', payload);
-  invalidateOrderCaches(order.id);
+  void invalidateOrderCaches(order.id);
   void invalidateConsumerLists(order.consumerUserId);
   void invalidateSupplierLists(order.supplierUserId);
   if (opts.push) {
@@ -97,7 +90,7 @@ function notifyOrderUpdated(
       userId: opts.push.userId,
       title: opts.push.title,
       body: opts.push.body,
-      data: { orderId: order.id, status: order.status },
+      data: { orderId: order.id, status: order.status, type: 'order' },
     }).catch(() => undefined);
   }
 }
@@ -372,7 +365,7 @@ ordersRouter.get('/supplier/orders', authenticate, requireRole('supplier'), asyn
 ordersRouter.get('/orders/:id', authenticate, async (req, res) => {
   const id = requireParam(req, 'id');
   const cacheKey = `order:detail:${id}:${req.user!.id}`;
-  const cached = responseCacheGet<Record<string, unknown>>(cacheKey);
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey);
   if (cached) {
     res.setHeader('X-Cache', 'HIT');
     res.json(cached);
@@ -382,7 +375,7 @@ ordersRouter.get('/orders/:id', authenticate, async (req, res) => {
   const base = presentOrder(order);
   const enriched = await enrichOrderWithRatings(base, req.user!.id);
   const payload = { order: enriched };
-  responseCacheSet(cacheKey, payload, ORDER_DETAIL_TTL_MS);
+  await cacheSet(cacheKey, payload, ORDER_DETAIL_TTL_MS);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);
 });
@@ -725,7 +718,7 @@ ordersRouter.post(
       });
     }
 
-    invalidateOrderCaches(order.id);
+    void invalidateOrderCaches(order.id);
     emitTracking(order.id, 'order.updated', {
       orderId: order.id,
       status: order.status,
@@ -902,7 +895,7 @@ ordersRouter.post(
 ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
   const orderId = requireParam(req, 'id');
   const cacheKey = `order:challan:${orderId}:${req.user!.id}`;
-  const cached = responseCacheGet<Record<string, unknown>>(cacheKey);
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey);
   if (cached) {
     res.setHeader('X-Cache', 'HIT');
     res.json(cached);
@@ -983,7 +976,7 @@ ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
         lineSnapshotJson: lines,
       },
     });
-    responseCacheInvalidate(`order:detail:${orderId}:`);
+    await invalidateOrderCaches(orderId);
   }
 
   const lines = Array.isArray(challan.lineSnapshotJson)
@@ -1001,7 +994,7 @@ ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
     amountPaise,
     orderCode: order.orderCode,
   };
-  responseCacheSet(cacheKey, payload, CHALLAN_TTL_MS);
+  await cacheSet(cacheKey, payload, CHALLAN_TTL_MS);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);
 });

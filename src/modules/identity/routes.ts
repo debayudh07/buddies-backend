@@ -419,9 +419,14 @@ identityRouter.post(
   authenticate,
   validateBody(z.object({ token: z.string(), platform: z.string().optional() })),
   async (req, res) => {
+    const token = String(req.body.token ?? '');
+    if (!token || token.startsWith('fallback:')) {
+      res.status(204).end();
+      return;
+    }
     const device = await prisma.deviceToken.upsert({
-      where: { userId_token: { userId: req.user!.id, token: req.body.token } },
-      create: { userId: req.user!.id, token: req.body.token, platform: req.body.platform },
+      where: { userId_token: { userId: req.user!.id, token } },
+      create: { userId: req.user!.id, token, platform: req.body.platform },
       update: { platform: req.body.platform },
     });
     res.status(201).json({ device });

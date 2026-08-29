@@ -154,7 +154,7 @@ messagingRouter.post(
       userId: peer,
       title: 'New message',
       body: req.body.body.slice(0, 80),
-      data: { orderId: order.id, threadId: order.chatThread.id },
+      data: { orderId: order.id, threadId: order.chatThread.id, type: 'chat' },
     }).catch(() => undefined);
 
     res.status(201).json({ message });
@@ -217,7 +217,7 @@ messagingRouter.post(
       userId: peer,
       title: 'New message',
       body: req.body.body.slice(0, 80),
-      data: { claimId: claim.id, threadId: thread.id },
+      data: { claimId: claim.id, threadId: thread.id, type: 'chat' },
     }).catch(() => undefined);
     res.status(201).json({ message });
   },

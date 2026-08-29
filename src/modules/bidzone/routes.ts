@@ -15,7 +15,7 @@ import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/serv
 import { shelfRulesForItems } from '../../lib/product-categories';
 import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 import { publicSupplierLabel } from '../../lib/user-present';
-import { cacheGet, cacheSet, invalidateBidzoneFeeds, invalidateSupplierLists, invalidateConsumerLists } from '../../lib/response-cache';
+import { cacheGet, cacheSet, invalidateBidzoneFeeds, invalidateSupplierLists, invalidateConsumerLists, invalidateDemandDetail } from '../../lib/response-cache';
 
 export const bidzoneRouter = Router();
 
@@ -565,13 +565,14 @@ bidzoneRouter.post(
       invalidateBidzoneFeeds(),
       invalidateSupplierLists(profile.userId),
       consumer ? invalidateConsumerLists(consumer.userId) : Promise.resolve(),
+      invalidateDemandDetail(bidRequest.id),
     ]);
     if (consumer) {
       void sendPush({
         userId: consumer.userId,
         title: 'New bid',
         body: `${publicSupplierLabel(profile)} bid ₹${(bidAmountPaise / 100).toFixed(0)} (active ${Math.round(config.auction.bidTtlSec / 60)} min)`,
-        data: { bidRequestId: bidRequest.id, bidId: bid.id },
+        data: { bidRequestId: bidRequest.id, bidId: bid.id, type: 'bid' },
       }).catch(() => undefined);
     }
 
@@ -592,6 +593,13 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
     Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1),
     100,
   );
+  const cacheKey = `supplier:bids:${req.user!.id}:${take}`;
+  const cached = await cacheGet<{ bids: unknown }>(cacheKey);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
   const bids = await prisma.bid.findMany({
     where: { supplierId: profile.id },
     include: {
@@ -764,7 +772,10 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
     };
   });
 
-  res.json({ bids: enriched });
+  const payload = { bids: enriched };
+  await cacheSet(cacheKey, payload, 8_000);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(payload);
 });
 
 bidzoneRouter.post('/supplier/bids/:id/withdraw', authenticate, requireRole('supplier'), async (req, res) => {
@@ -785,6 +796,7 @@ bidzoneRouter.post('/supplier/bids/:id/withdraw', authenticate, requireRole('sup
   await Promise.all([
     invalidateBidzoneFeeds(),
     invalidateSupplierLists(profile.userId),
+    invalidateDemandDetail(bid.bidRequestId),
   ]);
   res.json({ bid: updated });
 });
@@ -804,6 +816,17 @@ bidzoneRouter.get(
     );
     if (bidRequest.consumer.userId !== req.user!.id && req.user!.role !== 'admin') {
       throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
+    }
+
+    const itemId = req.query.itemId as string | undefined;
+    const sort = req.query.sort as string | undefined; // price | score | rating | coverage
+    const statusParam = req.query.status as string | undefined; // active | accepted | all
+    const cacheKey = `demand:bids:${bidRequestId}:${itemId ?? ''}:${sort ?? ''}:${statusParam ?? ''}:${req.user!.id}`;
+    const cached = await cacheGet<Record<string, unknown>>(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'HIT');
+      res.json(cached);
+      return;
     }
 
     const bids = await prisma.bid.findMany({
@@ -827,10 +850,6 @@ bidzoneRouter.get(
       },
       orderBy: { score: 'desc' },
     });
-
-    const itemId = req.query.itemId as string | undefined;
-    const sort = req.query.sort as string | undefined; // price | score | rating | coverage
-    const statusParam = req.query.status as string | undefined; // active | accepted | all
 
     let filteredBids = bids;
 
@@ -875,7 +894,7 @@ bidzoneRouter.get(
       filteredBids.sort((a, b) => b.score - a.score);
     }
 
-    res.json({
+    const payload = {
       bids: filteredBids.map((b) => ({
         ...b,
         supplier: b.supplier
@@ -883,7 +902,10 @@ bidzoneRouter.get(
           : b.supplier,
       })),
       bidTtlSec: config.auction.bidTtlSec,
-    });
+    };
+    await cacheSet(cacheKey, payload, 8_000);
+    res.setHeader('X-Cache', 'MISS');
+    res.json(payload);
   },
 );
 
@@ -1012,13 +1034,14 @@ bidzoneRouter.post(
       userId: bid.supplier.userId,
       title: 'You won the bid',
       body: `Order ${order.orderCode} is ready — open it to chat and start preparing.`,
-      data: { bidId: bid.id, orderId: order.id },
+      data: { bidId: bid.id, orderId: order.id, type: 'order' },
     });
 
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateSupplierLists(bid.supplier.userId),
       invalidateConsumerLists(bid.bidRequest.consumer.userId),
+      invalidateDemandDetail(bid.bidRequestId),
     ]);
 
     res.json({
@@ -1208,7 +1231,7 @@ bidzoneRouter.post(
           userId: winner.supplier.userId,
           title: 'You won items',
           body: `Order ${order.orderCode} is ready — open it to chat and start preparing.`,
-          data: { bidId: order.bidId, orderId: order.id },
+          data: { bidId: order.bidId, orderId: order.id, type: 'order' },
         });
       }
     }
@@ -1228,6 +1251,7 @@ bidzoneRouter.post(
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(bidRequest.consumer.userId),
+      invalidateDemandDetail(bidRequestId),
       ...[...bidById.values()].map((w) => invalidateSupplierLists(w.supplier.userId)),
     ]);
 
@@ -1266,6 +1290,7 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
     invalidateBidzoneFeeds(),
     invalidateSupplierLists(bid.supplier.userId),
     invalidateConsumerLists(req.user!.id),
+    invalidateDemandDetail(bid.bidRequestId),
   ]);
   res.json({ bid: updated });
 });

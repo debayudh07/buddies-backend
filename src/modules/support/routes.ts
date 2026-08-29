@@ -181,7 +181,7 @@ supportRouter.post(
         userId: ticket.userId,
         title: 'Support replied',
         body: req.body.body.slice(0, 80),
-        data: { ticketId: ticket.id },
+        data: { ticketId: ticket.id, type: 'support' },
       });
     }
     res.status(201).json({ message });
