@@ -7,7 +7,7 @@ import { AppError } from '../../lib/errors';
 import {
   getActiveSubscription,
   getConsumerBidSlots,
-  getSupplierBidCap,
+  getSupplierBidQuotaInfo,
   SUPPLIER_PREMIUM_BID_CAP,
 } from './service';
 
@@ -15,10 +15,10 @@ export const subscriptionsRouter = Router();
 
 subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
   const sub = await getActiveSubscription(req.user!.id);
+  const quotaInfo =
+    req.user!.role === 'supplier' ? await getSupplierBidQuotaInfo(req.user!.id) : null;
   const cap =
-    req.user!.role === 'supplier'
-      ? await getSupplierBidCap(req.user!.id)
-      : await getConsumerBidSlots(req.user!.id);
+    quotaInfo?.cap ?? (await getConsumerBidSlots(req.user!.id));
 
   let activeBids = 0;
   if (req.user!.role === 'supplier') {
@@ -54,7 +54,12 @@ subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
 
   res.json({
     subscription: sub,
-    quota: { cap, used: activeBids, remaining: Math.max(0, cap - activeBids) },
+    quota: {
+      cap,
+      used: activeBids,
+      remaining: Math.max(0, cap - activeBids),
+      ...(quotaInfo?.reason ? { reason: quotaInfo.reason } : {}),
+    },
     pricing,
   });
 });

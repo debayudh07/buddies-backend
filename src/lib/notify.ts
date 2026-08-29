@@ -207,7 +207,7 @@ export async function sendPush(payload: NotifyPayload): Promise<void> {
 
   if (tokens.length === 0) {
     // Normal on simulators / installs that never registered FCM — don't spam info logs.
-    logger.debug('fcm', 'no device tokens', { userId: payload.userId, title: payload.title });
+    logger.warn('fcm', 'no device tokens', { userId: payload.userId, title: payload.title });
     return;
   }
 
@@ -227,8 +227,17 @@ export async function sendPush(payload: NotifyPayload): Promise<void> {
       body: payload.body,
     },
     data,
-    android: { priority: 'high' },
+    android: {
+      priority: 'high',
+      notification: {
+        channelId: 'buddies_push',
+        sound: 'default',
+        defaultSound: true,
+        defaultVibrateTimings: true,
+      },
+    },
     apns: { payload: { aps: { sound: 'default' } } },
+    fcmOptions: { analyticsLabel: type.slice(0, 50) },
   };
 
   let result: BatchResponse;

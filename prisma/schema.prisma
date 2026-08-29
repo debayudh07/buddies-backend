@@ -266,6 +266,8 @@ model BidRequestItem {
   catalogItemSlug   String?
   minimumOrderQty   Float?
   minimumOrderUnit  String?
+  /// Pack size: Small/Medium/Large for pcs, or 180ml/250ml/750ml/1L/2L for beverages.
+  packSize          String?
   awardedBidId      String?
 
   bidRequest BidRequest    @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
@@ -282,6 +284,8 @@ model BidLineItem {
   bidRequestItemId String
   /// Price for this specific item (total for the requested quantity)
   amountPaise      Int
+  /// Price for 1 requested unit, in paise. Line total = unitPricePaise * quantity.
+  unitPricePaise   Int?
   notes            String?
   createdAt        DateTime @default(now())
 

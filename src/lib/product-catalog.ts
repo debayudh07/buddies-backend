@@ -800,6 +800,27 @@ export function resolveCatalogItem(
   return itemIndex.get(`${catalogCategory}:${catalogItemSlug}`) ?? null;
 }
 
+export const BEVERAGE_CATALOG_SLUG = 'cold_non_alcoholic_beverages';
+export const PIECE_PACK_SIZES = ['Small', 'Medium', 'Large'] as const;
+export const BEVERAGE_PACK_SIZES = ['180ml', '250ml', '750ml', '1L', '2L'] as const;
+export type PackSizeKind = 'piece' | 'beverage';
+
+export function packSizeKindForCategory(
+  cat: CatalogCategoryDef | string | null | undefined,
+): PackSizeKind | null {
+  const resolved = typeof cat === 'string' ? getCatalogCategory(cat) : cat;
+  if (!resolved) return null;
+  if (resolved.slug === BEVERAGE_CATALOG_SLUG) return 'beverage';
+  if (resolved.moqUnit === 'pcs') return 'piece';
+  return null;
+}
+
+export function packSizeOptionsForKind(kind: PackSizeKind | null): string[] {
+  if (kind === 'beverage') return [...BEVERAGE_PACK_SIZES];
+  if (kind === 'piece') return [...PIECE_PACK_SIZES];
+  return [];
+}
+
 export function presentCatalog(opts?: { q?: string; category?: string; previewLimit?: number }) {
   const q = (opts?.q ?? '').trim().toLowerCase();
   const categoryFilter = opts?.category?.trim();
@@ -825,6 +846,8 @@ export function presentCatalog(opts?: { q?: string; category?: string; previewLi
         sortOrder: c.sortOrder,
         moqQty: c.moqQty,
         moqUnit: c.moqUnit,
+        packSizeKind: packSizeKindForCategory(c),
+        packSizeOptions: packSizeOptionsForKind(packSizeKindForCategory(c)),
         itemCount: c.items.length,
         items: (q ? itemsOut : c.items).map((i) => ({
           slug: i.slug,
@@ -857,6 +880,7 @@ export type IncomingCatalogLine = {
   unit?: string;
   productCategory?: string;
   gradeHint?: string;
+  packSize?: string;
 };
 
 export type CanonicalLine = {
@@ -869,6 +893,7 @@ export type CanonicalLine = {
   minimumOrderQty: number;
   minimumOrderUnit: CatalogUnit;
   gradeHint?: string;
+  packSize?: string;
 };
 
 function normalizeUnit(raw?: string | null): CatalogUnit | null {
@@ -902,7 +927,14 @@ export function lineWeightKg(quantity: number, unit: CatalogUnit): number {
 }
 
 export type CatalogResolveError = {
-  code: 'UNKNOWN_CATEGORY' | 'UNKNOWN_ITEM' | 'CATEGORY_ITEM_MISMATCH' | 'INVALID_UNIT' | 'MOQ_BELOW_MINIMUM';
+  code:
+    | 'UNKNOWN_CATEGORY'
+    | 'UNKNOWN_ITEM'
+    | 'CATEGORY_ITEM_MISMATCH'
+    | 'INVALID_UNIT'
+    | 'MOQ_BELOW_MINIMUM'
+    | 'PACK_SIZE_REQUIRED'
+    | 'INVALID_PACK_SIZE';
   message: string;
 };
 
@@ -942,6 +974,24 @@ export function canonicalizeLine(input: IncomingCatalogLine): CanonicalLine | Ca
     };
   }
 
+  const packKind = packSizeKindForCategory(resolved.category);
+  const packOptions = packSizeOptionsForKind(packKind);
+  const packSize = input.packSize?.trim() || undefined;
+  if (packKind) {
+    if (!packSize) {
+      return {
+        code: 'PACK_SIZE_REQUIRED',
+        message: `Pick a pack size (${packOptions.join(', ')}) for ${resolved.item.name}`,
+      };
+    }
+    if (!packOptions.includes(packSize)) {
+      return {
+        code: 'INVALID_PACK_SIZE',
+        message: `Pack size must be one of: ${packOptions.join(', ')}`,
+      };
+    }
+  }
+
   return {
     catalogCategory: resolved.category.slug,
     catalogItemSlug: resolved.item.slug,
@@ -952,6 +1002,7 @@ export function canonicalizeLine(input: IncomingCatalogLine): CanonicalLine | Ca
     minimumOrderQty: resolved.category.moqQty,
     minimumOrderUnit: resolved.category.moqUnit,
     gradeHint: input.gradeHint,
+    packSize: packKind ? packSize : undefined,
   };
 }
 
@@ -972,12 +1023,15 @@ export function assertCartRule(lines: CanonicalLine[]): CartRuleError | null {
 }
 
 export function presentCategory(c: CatalogCategoryDef) {
+  const packSizeKind = packSizeKindForCategory(c);
   return {
     slug: c.slug,
     label: c.label,
     sortOrder: c.sortOrder,
     moqQty: c.moqQty,
     moqUnit: c.moqUnit,
+    packSizeKind,
+    packSizeOptions: packSizeOptionsForKind(packSizeKind),
     itemCount: c.items.length,
   };
 }

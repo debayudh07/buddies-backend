@@ -7,11 +7,12 @@ import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
 import { haversineKm } from '../../lib/haversine';
 import { computeBidScore } from '../../lib/scoring';
-import { getSupplierBidCap } from '../subscriptions/service';
+import { getSupplierBidQuotaInfo } from '../subscriptions/service';
 import { config } from '../../config';
 import { emitAuction, emitUser } from '../../socket';
 import { sendPush } from '../../lib/notify';
 import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/service';
+import { assertPaymentBacklog } from '../../lib/payment-backlog';
 import { shelfRulesForItems } from '../../lib/product-categories';
 import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 import { publicSupplierLabel } from '../../lib/user-present';
@@ -89,7 +90,7 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
     ordersByStatusRaw,
     recentOrders,
     recentBids,
-    bidCap,
+    quotaInfo,
   ] = await Promise.all([
     prisma.bidRequest.count({ where: { status: 'open', liveEndsAt: { gt: new Date() } } }),
     prisma.order.count({
@@ -124,7 +125,7 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
           select: { createdAt: true },
         })
       : Promise.resolve([] as { createdAt: Date }[]),
-    getSupplierBidCap(userId),
+    getSupplierBidQuotaInfo(userId),
   ]);
 
   const dayKeys: string[] = [];
@@ -156,9 +157,10 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
     activeBids,
     completedOrders,
     bidQuota: {
-      cap: bidCap,
+      cap: quotaInfo.cap,
       used: activeBids,
-      remaining: Math.max(0, bidCap - activeBids),
+      remaining: Math.max(0, quotaInfo.cap - activeBids),
+      ...(quotaInfo.reason ? { reason: quotaInfo.reason } : {}),
     },
     performance: profile
       ? {
@@ -198,8 +200,8 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
     where: { userId: req.user!.id },
     select: { id: true, lat: true, lng: true, kycStatus: true, categories: true },
   });
-  const [bidCap, activeBidCount] = await Promise.all([
-    getSupplierBidCap(req.user!.id),
+  const [quotaInfo, activeBidCount] = await Promise.all([
+    getSupplierBidQuotaInfo(req.user!.id),
     profile
       ? prisma.bid.count({
           where: { supplierId: profile.id, ...activeUnexpiredWhere() },
@@ -229,6 +231,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
           catalogItemSlug: true,
           minimumOrderQty: true,
           minimumOrderUnit: true,
+          packSize: true,
           status: true,
         },
       },
@@ -270,15 +273,16 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
     };
   });
 
-  const remaining = Math.max(0, bidCap - activeBidCount);
+  const remaining = Math.max(0, quotaInfo.cap - activeBidCount);
   const payload = {
     feed,
     kycStatus: profile?.kycStatus ?? 'draft',
     canBid: profile?.kycStatus === 'verified' && remaining > 0,
     bidQuota: {
-      cap: bidCap,
+      cap: quotaInfo.cap,
       used: activeBidCount,
       remaining,
+      ...(quotaInfo.reason ? { reason: quotaInfo.reason } : {}),
     },
     categories: profile?.categories ?? [],
   };
@@ -298,6 +302,7 @@ const placeBidSchema = z.object({
   lines: z.array(z.object({
     bidRequestItemId: z.string().min(1),
     amountPaise: z.coerce.number().int().positive(),
+    unitPricePaise: z.coerce.number().int().positive().optional(),
     notes: z.string().optional(),
   })).optional(),
 });
@@ -311,12 +316,16 @@ bidzoneRouter.post(
     const body = req.body as z.infer<typeof placeBidSchema>;
     const profile = await requireVerifiedSupplier(req.user!.id);
 
-    const cap = await getSupplierBidCap(req.user!.id);
+    const quotaInfo = await getSupplierBidQuotaInfo(req.user!.id);
     const activeCount = await prisma.bid.count({
       where: { supplierId: profile.id, ...activeUnexpiredWhere() },
     });
-    if (activeCount >= cap) {
-      throw new AppError(403, 'BID_QUOTA_EXCEEDED', `Max ${cap} concurrent bids; upgrade to premium`);
+    if (activeCount >= quotaInfo.cap) {
+      throw new AppError(
+        403,
+        'BID_QUOTA_EXCEEDED',
+        quotaInfo.reason ?? `Max ${quotaInfo.cap} concurrent bids`,
+      );
     }
 
     const bidRequest = assertFound(
@@ -328,33 +337,41 @@ bidzoneRouter.post(
     if (!body.grade || body.rslDaysAtDelivery < 0) {
       throw new AppError(400, 'RSL_REQUIRED', 'Grade and RSL required');
     }
-    if (body.rslDaysAtDelivery > body.shelfLifeDays) {
-      throw new AppError(
-        400,
-        'RSL_EXCEEDS_SHELF',
-        'Remaining shelf life (RSL) cannot exceed total shelf life',
-      );
-    }
 
-    const lines = body.lines || [];
-    const isItemized = lines.length > 0;
+    const rawLines = body.lines || [];
+    const isItemized = rawLines.length > 0;
 
     if (!body.amountPaise && !isItemized) {
       throw new AppError(400, 'AMOUNT_OR_LINES_REQUIRED', 'Either amountPaise or per-item lines must be provided');
     }
 
     if (isItemized) {
-      const ids = lines.map((l) => l.bidRequestItemId);
+      const ids = rawLines.map((l) => l.bidRequestItemId);
       if (new Set(ids).size !== ids.length) {
         throw new AppError(400, 'DUPLICATE_LINE', 'Each item can appear only once in a bid');
       }
       const reqItemIds = bidRequest.items.map((i) => i.id);
-      for (const line of lines) {
+      for (const line of rawLines) {
         if (!reqItemIds.includes(line.bidRequestItemId)) {
           throw new AppError(400, 'INVALID_ITEM_ID', `Item ${line.bidRequestItemId} is not in the bid request`);
         }
       }
     }
+
+    const lines = rawLines.map((l) => {
+      const item = bidRequest.items.find((i) => i.id === l.bidRequestItemId);
+      const qty = item?.quantity ?? 0;
+      if (l.unitPricePaise && qty > 0) {
+        return {
+          ...l,
+          unitPricePaise: l.unitPricePaise,
+          amountPaise: Math.round(l.unitPricePaise * qty),
+        };
+      }
+      const unitPricePaise =
+        qty > 0 ? Math.round(l.amountPaise / qty) : l.amountPaise;
+      return { ...l, unitPricePaise, amountPaise: l.amountPaise };
+    });
 
     const bidAmountPaise = isItemized
       ? lines.reduce((sum, l) => sum + l.amountPaise, 0)
@@ -391,13 +408,14 @@ bidzoneRouter.post(
         `Minimum RSL for the covered items is ${rules.minRslDays} day(s) at delivery (category matrix). You entered ${body.rslDaysAtDelivery}.`,
       );
     }
-    if (body.shelfLifeDays < rules.minRslDays) {
+    if (body.rslDaysAtDelivery > rules.totalShelfLifeDays) {
       throw new AppError(
         400,
-        'SHELF_BELOW_MATRIX',
-        `Total shelf life must be at least ${rules.minRslDays} day(s) for the covered items.`,
+        'RSL_EXCEEDS_SHELF',
+        `Remaining shelf life cannot exceed ${rules.totalShelfLifeDays} day(s) for the covered items.`,
       );
     }
+    const shelfLifeDays = Math.max(body.shelfLifeDays, rules.totalShelfLifeDays);
 
     const minDecrementPaise = config.auction.minDecrementPaise;
 
@@ -508,7 +526,7 @@ bidzoneRouter.post(
           supplierId: profile.id,
           amountPaise: bidAmountPaise,
           grade: body.grade,
-          shelfLifeDays: body.shelfLifeDays,
+          shelfLifeDays,
           rslDaysAtDelivery: body.rslDaysAtDelivery,
           notes: body.notes,
           score,
@@ -531,6 +549,7 @@ bidzoneRouter.post(
             bidId: createdBid.id,
             bidRequestItemId: l.bidRequestItemId,
             amountPaise: l.amountPaise,
+            unitPricePaise: l.unitPricePaise ?? null,
             notes: l.notes || null,
           })),
         });
@@ -674,12 +693,16 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       unit: it.unit,
       productCategory: it.productCategory,
       gradeHint: it.gradeHint,
+      packSize: (it as { packSize?: string | null }).packSize ?? null,
     }));
     const itemSummary =
       items.length === 0
         ? 'No items listed'
         : items
-            .map((it) => `${it.name} × ${it.quantity}${it.unit ? ` ${it.unit}` : ''}`)
+            .map((it) => {
+              const pack = it.packSize ? ` · ${it.packSize}` : '';
+              return `${it.name} × ${it.quantity}${it.unit ? ` ${it.unit}` : ''}${pack}`;
+            })
             .join(', ');
 
     const needsSupplierAck = b.status === 'accepted' && !b.supplierAckAt;
@@ -934,6 +957,8 @@ bidzoneRouter.post(
     }
     if (bid.bidRequest.status !== 'open') throw new AppError(400, 'NOT_OPEN', 'Already awarded');
 
+    await assertPaymentBacklog(req.user!.id, 1);
+
     // Single transaction: award + reject peers if fully awarded (order create next under race-safe path)
     try {
       await prisma.$transaction(async (tx) => {
@@ -1161,6 +1186,8 @@ bidzoneRouter.post(
         grouped.itemIds.push(sel.bidRequestItemId);
       }
     }
+
+    await assertPaymentBacklog(req.user!.id, bySupplier.size);
 
     const orders = await prisma.$transaction(async (tx) => {
       const current = await tx.bidRequest.findUnique({

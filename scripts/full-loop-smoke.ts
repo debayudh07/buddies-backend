@@ -331,7 +331,7 @@ async function main() {
   await api('status arrived', 'POST', `/orders/${orderId}/status`, S, { status: 'arrived' });
 
   // Challan + invoice (signature stored in Supabase)
-  log('\n10. Challan + invoice');
+  log('\n10. Challan');
   await api('inspection start', 'POST', `/orders/${orderId}/inspection/start`, C);
   const sigUpload = await upload(
     'challan signature upload',
@@ -341,20 +341,50 @@ async function main() {
     'sig.png',
     'image/png',
   );
-  const signed = await api('sign challan', 'POST', `/orders/${orderId}/inspection/sign-challan`, C, {
+  await api('sign challan', 'POST', `/orders/${orderId}/inspection/sign-challan`, C, {
     signatureRef: sigUpload.storageRef,
   });
-  log(`  → invoice ${signed.invoice?.invoiceNumber ?? signed.invoice?.id ?? '(ok)'}`);
   await api('get challan', 'GET', `/orders/${orderId}/challan`, C);
-  await api('get invoice', 'GET', `/orders/${orderId}/invoice`, C);
+  await expectHttp('invoice not before payment', 'GET', `/orders/${orderId}/invoice`, C, undefined, 404);
 
   // Return with real Storage evidence
   log('\n11. Return claim + storage evidence');
   await api('return windows', 'GET', '/returns/windows', C);
+  const orderForReturn = await api('order detail for return', 'GET', `/orders/${orderId}`, C);
+  const returnLineIds = (orderForReturn.order?.items ?? [])
+    .map((i: { id?: string }) => i.id)
+    .filter((id: string | undefined): id is string => !!id);
+  if (!returnLineIds.length) throw new Error('Order has no returnable line items');
+
+  await expectHttp(
+    'return requires line items',
+    'POST',
+    `/orders/${orderId}/return-claims`,
+    C,
+    { reasonCode: 'leakage', productCategory: 'fresh_produce', lineItemIds: [] },
+    400,
+  );
+  await expectHttp(
+    'foreign line ids rejected',
+    'POST',
+    `/orders/${orderId}/return-claims`,
+    C,
+    { reasonCode: 'leakage', productCategory: 'fresh_produce', lineItemIds: ['not-an-item'] },
+    400,
+  );
+  await expectHttp(
+    'wrong category rejected',
+    'POST',
+    `/orders/${orderId}/return-claims`,
+    C,
+    { reasonCode: 'leakage', productCategory: 'frozen_food', lineItemIds: returnLineIds },
+    400,
+  );
+
   const claim = await api('create return', 'POST', `/orders/${orderId}/return-claims`, C, {
     reasonCode: 'leakage',
     productCategory: 'fresh_produce',
-    lineItemIds: [],
+    lineItemIds: returnLineIds,
     notes: 'Puncture on bag',
   });
   const claimId = claim.claim?.id ?? claim.id;
@@ -419,7 +449,7 @@ async function main() {
   const claim2 = await api('create replacement return', 'POST', `/orders/${orderId}/return-claims`, C, {
     reasonCode: 'leakage',
     productCategory: 'fresh_produce',
-    lineItemIds: [],
+    lineItemIds: returnLineIds,
     notes: 'Need replacement crate',
   });
   const claim2Id = claim2.claim?.id ?? claim2.id;
@@ -464,6 +494,10 @@ async function main() {
     methodNote: 'UPI',
   });
   await api('payment confirm', 'POST', `/orders/${orderId}/payment/confirm`, S);
+  const inv = await api('get invoice after paid', 'GET', `/orders/${orderId}/invoice`, C);
+  if (!inv.invoice?.paid) {
+    throw new Error('Invoice should be marked paid after supplier confirm');
+  }
 
   // Support
   log('\n13. Support');

@@ -20,6 +20,7 @@ import {
   type IncomingCatalogLine,
 } from '../../lib/product-catalog';
 import { invalidateBidzoneFeeds, invalidateConsumerLists, invalidateDemandDetail, cacheGet, cacheSet } from '../../lib/response-cache';
+import { assertPaymentBacklog } from '../../lib/payment-backlog';
 
 const knownCategory = z
   .string()
@@ -44,6 +45,7 @@ const catalogItemSchema = z.object({
   unit: z.string().min(1).optional(),
   productCategory: knownCategory.optional(),
   gradeHint: z.string().optional(),
+  packSize: z.string().min(1).optional(),
 });
 
 function canonicalizeItems(raw: IncomingCatalogLine[]): CanonicalLine[] {
@@ -68,6 +70,7 @@ function canonicalizeItems(raw: IncomingCatalogLine[]): CanonicalLine[] {
         minimumOrderQty: 0,
         minimumOrderUnit: (line.unit as CanonicalLine['unit']) ?? 'kg',
         gradeHint: line.gradeHint,
+        packSize: line.packSize,
       });
       continue;
     }
@@ -93,6 +96,7 @@ function itemCreateData(i: CanonicalLine) {
     catalogItemSlug: i.catalogItemSlug || null,
     minimumOrderQty: i.minimumOrderQty || null,
     minimumOrderUnit: i.minimumOrderUnit || null,
+    packSize: i.packSize || null,
   };
 }
 
@@ -169,6 +173,8 @@ demandRouter.post(
     if (!body.privacyAccepted) {
       throw new AppError(400, 'PRIVACY_REQUIRED', 'Privacy policy must be accepted');
     }
+
+    await assertPaymentBacklog(req.user!.id);
 
     let consumer = await prisma.consumerProfile.findUnique({ where: { userId: req.user!.id } });
     if (!consumer) {
@@ -289,6 +295,7 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
           catalogItemSlug: true,
           minimumOrderQty: true,
           minimumOrderUnit: true,
+          packSize: true,
           status: true,
         },
       },
@@ -687,6 +694,7 @@ demandRouter.post(
             catalogItemSlug: i.catalogItemSlug,
             minimumOrderQty: i.minimumOrderQty,
             minimumOrderUnit: i.minimumOrderUnit,
+            packSize: i.packSize,
           })),
         },
       },

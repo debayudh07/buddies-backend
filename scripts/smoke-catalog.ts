@@ -77,8 +77,9 @@ const pieces = canonicalizeLine({
   catalogItemSlug: 'tomato_ketchup',
   quantity: 2,
   unit: 'pcs',
+  packSize: 'Medium',
 });
-assert('ketchup 2pcs', !('code' in pieces));
+assert('ketchup 2pcs', !('code' in pieces) && pieces.packSize === 'Medium');
 
 const onePiece = canonicalizeLine({
   catalogCategory: 'sauces_condiments_dips',
@@ -116,12 +117,14 @@ const threeLight = [
     catalogItemSlug: 'tomato_ketchup',
     quantity: 2,
     unit: 'pcs',
+    packSize: 'Medium',
   }),
   mustCanon({
     catalogCategory: 'bakery_ingredients_essentials',
     catalogItemSlug: 'yeast',
     quantity: 2,
     unit: 'pcs',
+    packSize: 'Small',
   }),
   mustCanon({ catalogCategory: 'tea_coffee', catalogItemSlug: 'assam_tea', quantity: 1, unit: 'kg' }),
 ];
@@ -130,6 +133,40 @@ assert('cart 3 lines ok', assertCartRule(threeLight) === null);
 assert('g to kg', quantityInUnit(500, 'g', 'kg') === 0.5);
 assert('kg weight', lineWeightKg(10, 'kg') === 10);
 assert('L not weight', lineWeightKg(5, 'L') === 0);
+
+const ketchupNoPack = canonicalizeLine({
+  catalogCategory: 'sauces_condiments_dips',
+  catalogItemSlug: 'tomato_ketchup',
+  quantity: 2,
+  unit: 'pcs',
+});
+assert('ketchup pack required', 'code' in ketchupNoPack && ketchupNoPack.code === 'PACK_SIZE_REQUIRED');
+
+const beverage = canonicalizeLine({
+  catalogCategory: 'cold_non_alcoholic_beverages',
+  catalogItemSlug: 'soft_drinks',
+  quantity: 2,
+  unit: 'pcs',
+  packSize: '250ml',
+});
+assert('soft drink 250ml', !('code' in beverage) && beverage.packSize === '250ml');
+
+const beverageBad = canonicalizeLine({
+  catalogCategory: 'cold_non_alcoholic_beverages',
+  catalogItemSlug: 'soft_drinks',
+  quantity: 2,
+  unit: 'pcs',
+  packSize: 'Small',
+});
+assert('soft drink wrong pack', 'code' in beverageBad && beverageBad.code === 'INVALID_PACK_SIZE');
+
+const riceNoPack = canonicalizeLine({
+  catalogCategory: 'rice_rice_products',
+  catalogItemSlug: 'basmati_rice',
+  quantity: 5,
+  unit: 'kg',
+});
+assert('rice no pack size', !('code' in riceNoPack) && !riceNoPack.packSize);
 
 if (failed) {
   console.error(`\n${failed} failed`);

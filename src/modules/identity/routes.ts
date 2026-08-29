@@ -7,6 +7,7 @@ import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError } from '../../lib/errors';
 import { presentUser, invalidateAvatarCache } from '../../lib/user-present';
+import { getPaymentBacklog } from '../../lib/payment-backlog';
 import { uploadBuffer } from '../../lib/storage';
 import { invalidateCachedAuthUser, setCachedAuthUser } from '../../lib/auth-cache';
 
@@ -85,7 +86,11 @@ identityRouter.get('/me', authenticate, async (req, res) => {
       subscriptions: { where: { active: true } },
     },
   });
-  res.json({ user: await presentUser(user) });
+  res.json({
+    user: await presentUser(user),
+    paymentBacklog:
+      req.user!.role === 'consumer' ? await getPaymentBacklog(req.user!.id) : null,
+  });
 });
 
 const meUpdateSchema = z.object({

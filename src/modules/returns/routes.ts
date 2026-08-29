@@ -94,9 +94,27 @@ returnsRouter.get('/catalog/product-categories', authenticate, async (_req, res)
 const claimSchema = z.object({
   reasonCode: z.string(),
   productCategory: z.string(),
-  lineItemIds: z.array(z.string()).default([]),
+  lineItemIds: z.array(z.string().min(1)).min(1),
   notes: z.string().optional(),
 });
+
+type ReturnableOrderItem = {
+  id: string;
+  name: string;
+  quantity: number;
+  unit: string;
+  productCategory: string | null;
+  packSize?: string | null;
+};
+
+function allowedReturnItems(order: {
+  coveredItemIds?: string[] | null;
+  bidRequest?: { items?: ReturnableOrderItem[] | null } | null;
+}): ReturnableOrderItem[] {
+  const raw = order.bidRequest?.items ?? [];
+  const covered = order.coveredItemIds ?? [];
+  return covered.length > 0 ? raw.filter((i) => covered.includes(i.id)) : raw;
+}
 
 returnsRouter.post(
   '/orders/:id/return-claims',
@@ -104,13 +122,51 @@ returnsRouter.post(
   requireRole('consumer'),
   validateBody(claimSchema),
   async (req, res) => {
-    const order = assertFound(await prisma.order.findUnique({ where: { id: requireParam(req, 'id') } }));
+    const order = assertFound(
+      await prisma.order.findUnique({
+        where: { id: requireParam(req, 'id') },
+        include: {
+          bidRequest: {
+            select: {
+              items: {
+                select: {
+                  id: true,
+                  name: true,
+                  quantity: true,
+                  unit: true,
+                  productCategory: true,
+                  packSize: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
     if (order.consumerUserId !== req.user!.id) throw new AppError(403, 'FORBIDDEN', 'Not your order');
     if (order.status !== 'delivered' && order.status !== 'closed') {
       throw new AppError(400, 'NOT_DELIVERED', 'Returns only after delivery');
     }
     if (CHANGE_OF_MIND.has(req.body.reasonCode)) {
       throw new AppError(400, 'CHANGE_OF_MIND_FORBIDDEN', 'Change of mind is not a valid return');
+    }
+
+    const lineItemIds = req.body.lineItemIds as string[];
+    const allowed = allowedReturnItems(order);
+    const allowedIds = new Set(allowed.map((i) => i.id));
+    if (lineItemIds.some((id) => !allowedIds.has(id))) {
+      throw new AppError(400, 'INVALID_LINE_ITEMS', 'Return items must belong to this order');
+    }
+    const selected = allowed.filter((i) => lineItemIds.includes(i.id));
+    const selectedCats = new Set(
+      selected.map((i) => i.productCategory).filter((c): c is string => !!c && c.trim().length > 0),
+    );
+    if (selectedCats.size !== 1 || !selectedCats.has(req.body.productCategory)) {
+      throw new AppError(
+        400,
+        'ORDER_CATEGORY_MISMATCH',
+        'Product category must match the selected order items — one category per claim',
+      );
     }
 
     const window = await prisma.returnWindowMatrix.findUnique({
@@ -448,8 +504,12 @@ returnsRouter.get('/return-claims/:id', authenticate, async (req, res) => {
             orderCode: true,
             status: true,
             deliveryAddress: true,
+            coveredItemIds: true,
             bid: { select: { amountPaise: true } },
             bidRequest: { include: { items: true } },
+            digitalChallan: {
+              select: { lineSnapshotJson: true, signedAt: true, isDraft: true },
+            },
           },
         },
       },
@@ -458,7 +518,8 @@ returnsRouter.get('/return-claims/:id', authenticate, async (req, res) => {
   if (claim.consumerUserId !== req.user!.id && claim.supplierUserId !== req.user!.id && req.user!.role !== 'admin') {
     throw new AppError(403, 'FORBIDDEN', 'Not yours');
   }
-  res.json({ claim });
+  const items = allowedReturnItems(claim.order).filter((i) => claim.lineItemIds.includes(i.id));
+  res.json({ claim: { ...claim, items } });
 });
 
 returnsRouter.get('/orders/:id/return-claims', authenticate, async (req, res) => {

@@ -172,6 +172,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
                 productCategory: true,
                 catalogCategory: true,
                 catalogItemSlug: true,
+                packSize: true,
               },
             },
           },
@@ -253,6 +254,7 @@ const listOrderInclude = {
           productCategory: true,
           catalogCategory: true,
           catalogItemSlug: true,
+          packSize: true,
         },
         take: 8,
       },
@@ -278,6 +280,7 @@ function presentOrder<T extends {
       productCategory: string | null;
       catalogCategory?: string | null;
       catalogItemSlug?: string | null;
+      packSize?: string | null;
     }>;
   } | null;
   digitalChallan?: { lineSnapshotJson?: unknown } | null;
@@ -297,6 +300,7 @@ function presentOrder<T extends {
     productCategory: i.productCategory,
     catalogCategory: i.catalogCategory ?? null,
     catalogItemSlug: i.catalogItemSlug ?? null,
+    packSize: i.packSize ?? null,
   }));
   const snapshot = order.digitalChallan?.lineSnapshotJson;
   let totalPaise = order.bid?.amountPaise ?? 0;
@@ -855,19 +859,7 @@ ordersRouter.post(
         data: { active: false, endedAt: new Date() },
       });
 
-      // GST invoice from challan (skip if a concurrent request already created it)
-      const invNum = `INV-${o.orderCode}`;
-      const invoice = await tx.gstInvoice.upsert({
-        where: { orderId: o.id },
-        create: {
-          orderId: o.id,
-          invoiceNumber: invNum,
-          lineJson: challan.lineSnapshotJson as object,
-        },
-        update: {},
-      });
-
-      return { order: o, challan, invoice };
+      return { order: o, challan };
     });
 
     await updateSupplierPerformanceOnDelivery(order.supplierUserId, onTime);
@@ -925,6 +917,7 @@ ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
                 productCategory: true,
                 catalogCategory: true,
                 catalogItemSlug: true,
+                packSize: true,
               },
             },
           },
@@ -1001,10 +994,18 @@ ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
 
 async function loadInvoiceBundle(orderId: string, userId: string, role: string) {
   const order = await getOrderForUser(orderId, userId, role);
-  let invoice = await prisma.gstInvoice.findUnique({ where: { orderId: order.id } });
+  const payment = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
+  const settled = payment?.status === 'confirmed_by_supplier';
+  if (!settled) {
+    throw new AppError(
+      404,
+      'NO_INVOICE',
+      'Invoice is issued after the buyer marks paid and the supplier confirms receipt.',
+    );
+  }
 
-  // Backfill invoice if challan was signed but invoice row is missing.
-  if (!invoice && (order.status === 'delivered' || order.status === 'challan_signed' || order.status === 'closed')) {
+  let invoice = await prisma.gstInvoice.findUnique({ where: { orderId: order.id } });
+  if (!invoice) {
     const challan = order.digitalChallan;
     invoice = await prisma.gstInvoice.create({
       data: {
@@ -1013,10 +1014,6 @@ async function loadInvoiceBundle(orderId: string, userId: string, role: string) 
         lineJson: (challan?.lineSnapshotJson as object) ?? [],
       },
     });
-  }
-
-  if (!invoice) {
-    throw new AppError(404, 'NO_INVOICE', 'Invoice not generated yet — sign challan first');
   }
 
   const supplier = await prisma.supplierProfile.findUnique({
@@ -1035,6 +1032,7 @@ async function loadInvoiceBundle(orderId: string, userId: string, role: string) 
 
   return {
     order,
+    payment,
     invoice: {
       ...invoice,
       amountPaise,
@@ -1044,6 +1042,8 @@ async function loadInvoiceBundle(orderId: string, userId: string, role: string) 
       consumerLabel: consumer?.restaurantName ?? 'Buyer',
       deliveryAddress: order.deliveryAddress,
       lines,
+      paid: true,
+      paidAt: payment.confirmedAt,
       downloadPath: `orders/${order.id}/invoice/download`,
     },
   };
@@ -1073,6 +1073,8 @@ ordersRouter.get('/orders/:id/invoice/download', authenticate, async (req, res) 
     supplierLabel: invoice.supplierLabel,
     consumerLabel: invoice.consumerLabel,
     deliveryAddress: invoice.deliveryAddress,
+    paid: true,
+    paidAt: bundle.payment?.confirmedAt ?? null,
     lines: invoice.lines as Array<{
       name?: string;
       quantity?: number;
@@ -1222,10 +1224,11 @@ ordersRouter.post(
 
 ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supplier'), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
+  const existingPay = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
 
   if (order.status === 'closed') {
-    const payment = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
-    res.json({ payment, order, alreadyApplied: true });
+    const invoice = await prisma.gstInvoice.findUnique({ where: { orderId: order.id } });
+    res.json({ payment: existingPay, order, invoice, alreadyApplied: true });
     return;
   }
 
@@ -1250,6 +1253,7 @@ ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supp
     update: {
       status: 'confirmed_by_supplier',
       confirmedAt: new Date(),
+      markedPaidAt: existingPay?.markedPaidAt ?? new Date(),
     },
   });
   const updated = await prisma.order.update({
@@ -1262,6 +1266,16 @@ ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supp
       status: 'closed',
       note: 'Supplier confirmed payment received',
     },
+  });
+  const challan = await prisma.digitalChallan.findUnique({ where: { orderId: order.id } });
+  const invoice = await prisma.gstInvoice.upsert({
+    where: { orderId: order.id },
+    create: {
+      orderId: order.id,
+      invoiceNumber: `INV-${order.orderCode}`,
+      lineJson: (challan?.lineSnapshotJson as object) ?? [],
+    },
+    update: {},
   });
   notifyOrderUpdated(
     {
@@ -1280,7 +1294,7 @@ ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supp
       },
     },
   );
-  res.json({ payment, order: updated });
+  res.json({ payment, order: updated, invoice });
 });
 
 ordersRouter.post('/orders/:id/payment/dispute', authenticate, requireRole('supplier'), async (req, res) => {

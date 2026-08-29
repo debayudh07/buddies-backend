@@ -105,6 +105,7 @@ async function insertOrderFromBid(
               productCategory: i.productCategory,
               catalogCategory: i.catalogCategory,
               catalogItemSlug: i.catalogItemSlug,
+              packSize: i.packSize,
               grade: bid.grade,
               rslDaysAtDelivery: bid.rslDaysAtDelivery,
               amountPaise: amount,

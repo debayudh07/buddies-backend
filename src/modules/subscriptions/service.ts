@@ -2,7 +2,11 @@ import { prisma } from '../../lib/prisma';
 
 const CONSUMER_BID_SLOTS = 5;
 const SUPPLIER_BID_CAP = 5;
-const SUPPLIER_PREMIUM_BID_CAP = 50;
+const SUPPLIER_PREMIUM_BID_CAP = 5;
+const LOW_RATING_THRESHOLD = 3;
+const LOW_RATING_BID_CAP = 2;
+export const LOW_RATING_BID_CAP_REASON =
+  'Rating below 3.0 — max 2 active bids until it recovers.';
 
 export async function getActiveSubscription(userId: string) {
   const sub = await prisma.subscription.findFirst({
@@ -21,10 +25,35 @@ export async function getActiveSubscription(userId: string) {
   return sub;
 }
 
-export async function getSupplierBidCap(userId: string): Promise<number> {
+export function applyRatingBidCap(planCap: number, rating: number | null | undefined): number {
+  if (rating != null && rating < LOW_RATING_THRESHOLD) {
+    return Math.min(planCap, LOW_RATING_BID_CAP);
+  }
+  return planCap;
+}
+
+export async function getSupplierBidQuotaInfo(userId: string): Promise<{
+  cap: number;
+  ratingLimited: boolean;
+  reason: string | null;
+}> {
   const sub = await getActiveSubscription(userId);
-  if (sub?.plan === 'supplier_premium') return SUPPLIER_PREMIUM_BID_CAP;
-  return SUPPLIER_BID_CAP;
+  const planCap = sub?.plan === 'supplier_premium' ? SUPPLIER_PREMIUM_BID_CAP : SUPPLIER_BID_CAP;
+  const profile = await prisma.supplierProfile.findUnique({
+    where: { userId },
+    select: { rating: true },
+  });
+  const cap = applyRatingBidCap(planCap, profile?.rating);
+  const ratingLimited = profile != null && profile.rating < LOW_RATING_THRESHOLD;
+  return {
+    cap,
+    ratingLimited,
+    reason: ratingLimited ? LOW_RATING_BID_CAP_REASON : null,
+  };
+}
+
+export async function getSupplierBidCap(userId: string): Promise<number> {
+  return (await getSupplierBidQuotaInfo(userId)).cap;
 }
 
 export async function expireSubscriptions(): Promise<number> {
@@ -42,4 +71,10 @@ export async function getConsumerBidSlots(_userId: string): Promise<number> {
   return CONSUMER_BID_SLOTS;
 }
 
-export { CONSUMER_BID_SLOTS, SUPPLIER_BID_CAP, SUPPLIER_PREMIUM_BID_CAP };
+export {
+  CONSUMER_BID_SLOTS,
+  SUPPLIER_BID_CAP,
+  SUPPLIER_PREMIUM_BID_CAP,
+  LOW_RATING_THRESHOLD,
+  LOW_RATING_BID_CAP,
+};
