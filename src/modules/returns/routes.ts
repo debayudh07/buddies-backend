@@ -276,9 +276,21 @@ returnsRouter.post(
       );
     }
 
+    const lineItemIdRaw =
+      typeof req.body.lineItemId === 'string' ? req.body.lineItemId.trim() : '';
+    if (!lineItemIdRaw || !claim.lineItemIds.includes(lineItemIdRaw)) {
+      throw new AppError(
+        400,
+        'INVALID_LINE_ITEM',
+        'Photo must be tagged to an item on this return',
+      );
+    }
+    const lineItemId = lineItemIdRaw;
+
     const evidence = await prisma.returnEvidence.create({
       data: {
         claimId: claim.id,
+        lineItemId,
         storageRef,
         mediaType,
         batchNumber: req.body.batchNumber,
@@ -330,6 +342,17 @@ returnsRouter.post('/return-claims/:id/submit', authenticate, requireRole('consu
   }
   if (claim.evidence.length === 0) {
     throw new AppError(400, 'EVIDENCE_REQUIRED', 'Upload photo/video evidence first');
+  }
+  const evidencedLines = new Set(
+    claim.evidence.map((e) => e.lineItemId).filter((id): id is string => !!id && id.length > 0),
+  );
+  const missingPhoto = claim.lineItemIds.filter((id) => !evidencedLines.has(id));
+  if (missingPhoto.length > 0) {
+    throw new AppError(
+      400,
+      'ITEM_EVIDENCE_REQUIRED',
+      'Add at least one photo for each selected item',
+    );
   }
 
   // All submitted claims go to the supplier for review (no auto-approve).
@@ -519,7 +542,11 @@ returnsRouter.get('/return-claims/:id', authenticate, async (req, res) => {
     throw new AppError(403, 'FORBIDDEN', 'Not yours');
   }
   const items = allowedReturnItems(claim.order).filter((i) => claim.lineItemIds.includes(i.id));
-  res.json({ claim: { ...claim, items } });
+  const itemsWithPhotos = items.map((item) => ({
+    ...item,
+    evidence: claim.evidence.filter((e) => e.lineItemId === item.id),
+  }));
+  res.json({ claim: { ...claim, items: itemsWithPhotos } });
 });
 
 returnsRouter.get('/orders/:id/return-claims', authenticate, async (req, res) => {

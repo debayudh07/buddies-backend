@@ -1,5 +1,5 @@
 /**
- * Product category cart + shelf-life / return windows from "The buddies.docx".
+ * Product category cart + shelf-life / return windows from "The buddies (1).docx".
  * Slugs are stored on BidRequestItem.productCategory and matrix tables.
  */
 
@@ -21,159 +21,232 @@ export type ProductCategoryDef = {
   notes?: string;
 };
 
+const DRY_REASONS = ['moisture', 'torn_pack', 'pest'] as const;
+const PRODUCE_REASONS = ['rotting', 'bruising', 'wrong_weight', 'visual_infestation'] as const;
+const PROTEIN_REASONS = ['discoloration', 'off_odor', 'temp_abuse'] as const;
+const CHILLED_REASONS = ['thawed', 'bloating', 'broken_seal'] as const;
+
 /** Full categorical cart — one row per selectable product category. */
 export const PRODUCT_CATEGORIES: ProductCategoryDef[] = [
   {
-    productCategory: 'ultra_fresh_dairy',
-    label: 'Ultra-Fresh Dairy',
-    exampleItems: 'Fresh pouch milk, curd, paneer',
+    productCategory: 'dairy',
+    label: 'Dairy',
+    exampleItems: 'Fresh pouch milk, curd, paneer, lassi, tofu',
     totalShelfLifeDays: 5,
     minRslDays: 2,
     windowHours: 1,
-    validReasons: ['cold_chain_break', 'leakage', 'low_rsl', 'expired'],
-    notes: 'Doc: total 2–5 days; at least 2 full days remaining (excl. delivery day)',
+    validReasons: ['cold_chain_break', 'leakage', 'low_rsl'],
+    notes: 'Doc: cold-chain breakdown, leakage, or less than 2 days remaining',
   },
   {
-    productCategory: 'ultra_fresh_bakery',
-    label: 'Ultra-Fresh Bakery',
+    productCategory: 'meat_poultry',
+    label: 'Meat & Poultry',
+    exampleItems: 'Chicken, mutton, liver, mince',
+    totalShelfLifeDays: 3,
+    minRslDays: 1,
+    windowHours: 1,
+    validReasons: [...PROTEIN_REASONS],
+    notes: 'Doc: discoloration, off-odor, temperature abuse (>6 C on arrival)',
+  },
+  {
+    productCategory: 'seafood_eggs',
+    label: 'Seafood & Eggs',
+    exampleItems: 'Rohu, prawns, crab, chicken eggs, duck eggs',
+    totalShelfLifeDays: 3,
+    minRslDays: 1,
+    windowHours: 1,
+    validReasons: [...PROTEIN_REASONS],
+    notes: 'Doc: discoloration, off-odor, temperature abuse (>6 C on arrival)',
+  },
+  {
+    productCategory: 'bakery_perishables',
+    label: 'Bakery (Perishables)',
     exampleItems: 'Fresh bread, buns, croissants',
     totalShelfLifeDays: 5,
     minRslDays: 3,
     windowHours: 1,
-    validReasons: ['cold_chain_break', 'leakage', 'low_rsl', 'mold', 'expired'],
-    notes: 'Doc: total 3–5 days; at least 3 days remaining',
+    validReasons: ['leakage', 'low_rsl'],
+    notes: 'Doc: package leakage or short shelf life',
   },
   {
-    productCategory: 'fresh_proteins',
-    label: 'Chilled & Fresh Proteins',
-    exampleItems: 'Fresh chicken, fish, buff meat, prawns',
-    totalShelfLifeDays: 3,
-    minRslDays: 1,
-    windowHours: 1,
-    validReasons: ['discoloration', 'off_odor', 'temp_abuse', 'wrong_item'],
-    notes: 'Doc: total 2–3 days; deliver within 12h of slaughter/harvest preferred',
-  },
-  {
-    productCategory: 'fresh_produce',
-    label: 'Fresh Produce',
-    exampleItems: 'Leafy greens, tomatoes, exotic veggies',
+    productCategory: 'vegetables',
+    label: 'Vegetables',
+    exampleItems: 'Onion, potato, tomato, leafy greens',
     totalShelfLifeDays: 5,
     minRslDays: 2,
     windowHours: 2,
-    validReasons: ['rotting', 'bruising', 'wrong_weight', 'visual_infestation', 'wrong_item'],
-    notes: 'Doc return window 2h; typical short shelf 3–5 days',
+    validReasons: [...PRODUCE_REASONS],
   },
   {
-    productCategory: 'chilled_cheese',
-    label: 'Chilled Cheese',
-    exampleItems: 'Mozzarella, cheddar blocks',
+    productCategory: 'fruits',
+    label: 'Fruits',
+    exampleItems: 'Apple, banana, mango, citrus',
+    totalShelfLifeDays: 5,
+    minRslDays: 2,
+    windowHours: 2,
+    validReasons: [...PRODUCE_REASONS],
+  },
+  {
+    productCategory: 'chilled_dairy',
+    label: 'Chilled Dairy',
+    exampleItems: 'Butter, margarine, mozzarella, cheddar, whipping cream',
     totalShelfLifeDays: 270,
     minRslDays: 60,
     windowHours: 4,
-    validReasons: ['thawed', 'bloating', 'broken_seal', 'expired', 'low_rsl'],
-    notes: 'Doc: total 6–9 months; minimum 60 days remaining',
-  },
-  {
-    productCategory: 'chilled_fats',
-    label: 'Butter, Margarine & Cream',
-    exampleItems: 'Butter, cooking margarine, whipping cream',
-    totalShelfLifeDays: 365,
-    minRslDays: 90,
-    windowHours: 4,
-    validReasons: ['thawed', 'bloating', 'broken_seal', 'expired', 'low_rsl'],
-    notes: 'Doc: total 6–12 months; minimum 90 days remaining',
+    validReasons: [...CHILLED_REASONS],
+    notes: 'Doc: defrosted/thawed, severe bloating, or broken seals',
   },
   {
     productCategory: 'frozen_food',
-    label: 'Frozen Food Supply',
+    label: 'Frozen Foods',
     exampleItems: 'Frozen fries, veg patties, frozen purees',
     totalShelfLifeDays: 540,
     minRslDays: 120,
     windowHours: 4,
-    validReasons: ['thawed', 'bloating', 'broken_seal', 'expired'],
-    notes: 'Doc: total 12–18 months; minimum 120 days remaining',
+    validReasons: [...CHILLED_REASONS],
+    notes: 'Doc: defrosted/thawed, severe bloating, or broken seals',
   },
   {
-    productCategory: 'coffee_roasted',
-    label: 'Roasted Coffee',
-    exampleItems: 'Roasted coffee beans (whole/ground)',
+    productCategory: 'oils_fats',
+    label: 'Oils & Fats',
+    exampleItems: 'Mustard, sunflower, rice bran oil, ghee, vanaspati',
     totalShelfLifeDays: 365,
-    minRslDays: 90,
+    minRslDays: 60,
     windowHours: 24,
-    validReasons: ['torn_pack', 'stale', 'low_rsl', 'wrong_item'],
-    notes: 'Doc: total 6–12 months; min 90 days; roast date <30 days preferred',
-  },
-  {
-    productCategory: 'syrups_crushes',
-    label: 'Syrups & Fruit Crushes',
-    exampleItems: 'Flavored syrups, fruit crushes, purees',
-    totalShelfLifeDays: 1080,
-    minRslDays: 180,
-    windowHours: 24,
-    validReasons: ['cap_damage', 'crystallization', 'low_rsl', 'leakage'],
-    notes: 'Doc: total 12–36 months; minimum 6 months (180d) remaining',
+    validReasons: ['cap_damage', 'low_rsl'],
+    notes: 'Doc: cap damage or remaining shelf life less than 60 days',
   },
   {
     productCategory: 'sauces_condiments',
     label: 'Sauces & Condiments',
-    exampleItems: 'Mayonnaise, sauces, dressings, spreads',
+    exampleItems: 'Ketchup, mayonnaise, chutney, pickles',
     totalShelfLifeDays: 365,
     minRslDays: 60,
     windowHours: 24,
-    validReasons: ['cap_damage', 'broken_seal', 'low_rsl', 'leakage', 'wrong_item'],
-    notes: 'Doc: total 6–12 months; minimum 60 days remaining',
+    validReasons: ['cap_damage', 'low_rsl'],
+    notes: 'Doc: cap damage or remaining shelf life less than 60 days',
   },
   {
-    productCategory: 'cooking_oils',
-    label: 'Cooking Oils',
-    exampleItems: 'Mustard, sunflower, rice bran oil',
-    totalShelfLifeDays: 365,
-    minRslDays: 90,
+    productCategory: 'syrups_crushes',
+    label: 'Syrups, Crushes & Purees',
+    exampleItems: 'Fruit crushes, flavored syrups, dessert sauces',
+    totalShelfLifeDays: 1080,
+    minRslDays: 60,
     windowHours: 24,
-    validReasons: ['cap_damage', 'leakage', 'low_rsl', 'wrong_item'],
-    notes: 'Doc: total 12 months; minimum 90 days remaining',
+    validReasons: ['cap_damage', 'crystallization', 'low_rsl'],
+    notes: 'Doc: cap damage, crystallization (syrups), or remaining shelf life less than 60 days',
   },
   {
-    productCategory: 'dry_staples',
-    label: 'Dry Kitchen Staples',
-    exampleItems: 'Flour (maida), sugar, rice, dry spices',
-    totalShelfLifeDays: 730,
-    minRslDays: 180,
-    windowHours: 48,
-    validReasons: ['moisture', 'torn_pack', 'pest', 'wrong_item'],
-    notes: 'Doc: total 12–24 months; minimum 180 days remaining',
-  },
-  {
-    productCategory: 'packaged_beverages',
-    label: 'Packaged Beverages',
-    exampleItems: 'Canned/bottled soda, juices, tonic water',
+    productCategory: 'beverages',
+    label: 'Beverages',
+    exampleItems: 'Soft drinks, soda, juices, packaged water',
     totalShelfLifeDays: 180,
     minRslDays: 45,
     windowHours: 24,
-    validReasons: ['cap_damage', 'leakage', 'low_rsl', 'bloating', 'expired'],
-    notes: 'Doc: total 6 months; minimum 45 days remaining',
+    validReasons: ['cap_damage', 'low_rsl'],
+    notes: 'Doc: cap damage or low remaining shelf life',
+  },
+  {
+    productCategory: 'rice_flours',
+    label: 'Rice & Flours',
+    exampleItems: 'Basmati, atta, maida, suji, sugar',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: [...DRY_REASONS],
+  },
+  {
+    productCategory: 'dals_pulses',
+    label: 'Dals & Pulses',
+    exampleItems: 'Toor, moong, chana, rajma, masoor',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: [...DRY_REASONS],
+  },
+  {
+    productCategory: 'spices_sugar',
+    label: 'Spices & Sugar',
+    exampleItems: 'Turmeric, chilli, jeera, garam masala',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: [...DRY_REASONS],
+  },
+  {
+    productCategory: 'dry_fruits_nuts',
+    label: 'Dry Fruits & Nuts',
+    exampleItems: 'Almonds, cashews, raisins, makhana',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: [...DRY_REASONS],
+  },
+  {
+    productCategory: 'tea_coffee_bakery_goods',
+    label: 'Tea, Coffee & Bakery Goods',
+    exampleItems: 'Assam tea, roasted coffee, yeast, cake premix',
+    totalShelfLifeDays: 365,
+    minRslDays: 90,
+    windowHours: 48,
+    validReasons: [...DRY_REASONS],
+  },
+  {
+    productCategory: 'chocolate_cocoa',
+    label: 'Chocolate & Cocoa',
+    exampleItems: 'Dark/milk chocolate, cocoa powder, chips',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: [...DRY_REASONS],
+  },
+  {
+    productCategory: 'packaging_disposables',
+    label: 'Packaging & Disposables',
+    exampleItems: 'Foil, containers, boxes, cups, bags',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: ['torn_pack', 'contamination'],
+  },
+  {
+    productCategory: 'cleaning_utility',
+    label: 'Cleaning & Utility Supplies',
+    exampleItems: 'Dishwash, sanitizer, mops, gloves, garbage bags',
+    totalShelfLifeDays: 730,
+    minRslDays: 180,
+    windowHours: 48,
+    validReasons: ['torn_pack', 'product_damage'],
   },
 ];
 
 /** Older seed/app labels → current cart slug. */
 const CATEGORY_ALIASES: Record<string, string> = {
-  ultra_perishables_dairy: 'ultra_fresh_dairy',
-  ultra_fresh_perishables: 'ultra_fresh_dairy',
-  dairy: 'ultra_fresh_dairy',
-  bakery: 'ultra_fresh_bakery',
-  bread: 'ultra_fresh_bakery',
-  proteins: 'fresh_proteins',
-  meat: 'fresh_proteins',
-  produce: 'fresh_produce',
+  ultra_fresh_dairy: 'dairy',
+  ultra_perishables_dairy: 'dairy',
+  ultra_fresh_perishables: 'dairy',
+  ultra_fresh_bakery: 'bakery_perishables',
+  bakery: 'bakery_perishables',
+  bread: 'bakery_perishables',
+  fresh_proteins: 'meat_poultry',
+  proteins: 'meat_poultry',
+  meat: 'meat_poultry',
+  fresh_produce: 'vegetables',
+  produce: 'vegetables',
+  chilled_cheese: 'chilled_dairy',
+  chilled_fats: 'chilled_dairy',
+  cheese: 'chilled_dairy',
+  butter: 'chilled_dairy',
+  cooking_oils: 'oils_fats',
+  oils: 'oils_fats',
+  packaged_beverages: 'beverages',
+  coffee_roasted: 'tea_coffee_bakery_goods',
+  dry_staples: 'rice_flours',
+  dry_goods: 'rice_flours',
+  dry_ingredients: 'rice_flours',
   chilled_frozen_fmcg: 'frozen_food',
   frozen: 'frozen_food',
-  cheese: 'chilled_cheese',
-  butter: 'chilled_fats',
   ambient_liquids: 'syrups_crushes',
-  oils: 'cooking_oils',
-  dry_goods: 'dry_staples',
-  dry_ingredients: 'dry_staples',
-  beverages: 'packaged_beverages',
 };
 
 const bySlug = new Map(PRODUCT_CATEGORIES.map((c) => [c.productCategory, c]));
@@ -211,7 +284,6 @@ export function shelfRulesForItems(
     .filter((d): d is ProductCategoryDef => d != null);
 
   if (defs.length === 0) {
-    // Fallback: ultra-fresh dairy-ish defaults from doc when category missing
     return {
       minRslDays: 2,
       totalShelfLifeDays: 5,
@@ -231,7 +303,6 @@ export function shelfRulesForItems(
     if (d.notes) notes.push(`${d.productCategory}: ${d.notes}`);
   }
 
-  // Guarantee default total always covers the strictest min RSL for the cart
   totalShelfLifeDays = Math.max(totalShelfLifeDays, minRslDays);
 
   return {
@@ -244,4 +315,53 @@ export function shelfRulesForItems(
 
 export function categorySlugs(): string[] {
   return PRODUCT_CATEGORIES.map((c) => c.productCategory);
+}
+
+/** Canonical 20-slug list plus older aliases that map to those slugs (for DB overlap queries). */
+export function categoryMatchValues(canonical: string[]): string[] {
+  const set = new Set<string>();
+  for (const raw of canonical) {
+    const def = getCategoryDef(raw);
+    if (def) set.add(def.productCategory);
+  }
+  for (const [alias, target] of Object.entries(CATEGORY_ALIASES)) {
+    if (set.has(target)) set.add(alias);
+  }
+  return [...set];
+}
+
+export function canonicalizeSupplierCategories(raw: string[]): {
+  slugs: string[];
+  unknown: string[];
+} {
+  const slugs = new Set<string>();
+  const unknown: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string' || !item.trim()) continue;
+    const def = getCategoryDef(item);
+    if (!def) unknown.push(item.trim());
+    else slugs.add(def.productCategory);
+  }
+  return { slugs: [...slugs], unknown };
+}
+
+export function requestProductCategories(
+  items: Array<{ productCategory?: string | null }>,
+): string[] {
+  const slugs = new Set<string>();
+  for (const item of items) {
+    const def = getCategoryDef(item.productCategory);
+    if (def) slugs.add(def.productCategory);
+  }
+  return [...slugs];
+}
+
+export function supplierStocksCategory(
+  supplierCategories: string[],
+  productCategory?: string | null,
+): boolean {
+  const def = getCategoryDef(productCategory);
+  if (!def) return false;
+  const { slugs } = canonicalizeSupplierCategories(supplierCategories);
+  return slugs.includes(def.productCategory);
 }

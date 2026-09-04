@@ -96,7 +96,7 @@ async function bootstrap() {
     publicLabel: 'Deep Mart',
     lat: 13.01,
     lng: 77.55,
-    categories: ['fresh_produce'],
+    categories: ['vegetables'],
   });
   try {
     await api('POST', '/supplier/kyc/submit', S);
@@ -165,7 +165,7 @@ async function main() {
   const br = await api('POST', '/consumer/bid-requests', C, {
     privacyAccepted: true,
     budgetPaise: 200000,
-    items: [{ name: 'Potatoes', quantity: 8, unit: 'kg', productCategory: 'fresh_produce' }],
+    items: [{ name: 'Potatoes', quantity: 8, unit: 'kg', productCategory: 'vegetables' }],
     lat: 12.97,
     lng: 77.59,
   });
@@ -296,7 +296,7 @@ async function main() {
   const br2 = await api('POST', '/consumer/bid-requests', C, {
     privacyAccepted: true,
     budgetPaise: 100000,
-    items: [{ name: 'Coriander', quantity: 1, unit: 'kg', productCategory: 'fresh_produce' }],
+    items: [{ name: 'Coriander', quantity: 1, unit: 'kg', productCategory: 'vegetables' }],
   });
   await prisma.bidRequest.update({
     where: { id: br2.bidRequest.id },
@@ -313,7 +313,7 @@ async function main() {
   const br3 = await api('POST', '/consumer/bid-requests', C, {
     privacyAccepted: true,
     budgetPaise: 150000,
-    items: [{ name: 'Garlic', quantity: 2, unit: 'kg', productCategory: 'fresh_produce' }],
+    items: [{ name: 'Garlic', quantity: 2, unit: 'kg', productCategory: 'vegetables' }],
   });
   joinRoom(`auction:${br3.bidRequest.id}`);
   await new Promise((r) => setTimeout(r, 400));

@@ -13,7 +13,7 @@ import { emitAuction, emitUser } from '../../socket';
 import { sendPush } from '../../lib/notify';
 import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/service';
 import { assertPaymentBacklog } from '../../lib/payment-backlog';
-import { shelfRulesForItems } from '../../lib/product-categories';
+import { shelfRulesForItems, canonicalizeSupplierCategories, categoryMatchValues, supplierStocksCategory, getCategoryDef } from '../../lib/product-categories';
 import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 import { publicSupplierLabel } from '../../lib/user-present';
 import { cacheGet, cacheSet, invalidateBidzoneFeeds, invalidateSupplierLists, invalidateConsumerLists, invalidateDemandDetail } from '../../lib/response-cache';
@@ -79,6 +79,19 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
   sevenDaysAgo.setHours(0, 0, 0, 0);
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
 
+  const now = new Date();
+  const matchValues = categoryMatchValues(
+    canonicalizeSupplierCategories(profile?.categories ?? []).slugs,
+  );
+  const openWhere =
+    matchValues.length === 0
+      ? null
+      : {
+          status: 'open' as const,
+          liveEndsAt: { gt: now },
+          items: { some: { productCategory: { in: matchValues } } },
+        };
+
   const [
     openCount,
     activeOrders,
@@ -92,7 +105,9 @@ bidzoneRouter.get('/supplier/home', authenticate, requireRole('supplier'), async
     recentBids,
     quotaInfo,
   ] = await Promise.all([
-    prisma.bidRequest.count({ where: { status: 'open', liveEndsAt: { gt: new Date() } } }),
+    openWhere
+      ? prisma.bidRequest.count({ where: openWhere })
+      : Promise.resolve(0),
     prisma.order.count({
       where: {
         supplierUserId: userId,
@@ -209,42 +224,51 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       : Promise.resolve(0),
   ]);
   const now = new Date();
-  const requests = await prisma.bidRequest.findMany({
-    where: { status: 'open', liveEndsAt: { gt: now } },
-    select: {
-      id: true,
-      batchCode: true,
-      budgetPaise: true,
-      liveEndsAt: true,
-      extendCount: true,
-      lat: true,
-      lng: true,
-      items: {
-        select: {
-          id: true,
-          name: true,
-          quantity: true,
-          unit: true,
-          productCategory: true,
-          gradeHint: true,
-          catalogCategory: true,
-          catalogItemSlug: true,
-          minimumOrderQty: true,
-          minimumOrderUnit: true,
-          packSize: true,
-          status: true,
-        },
-      },
-      bids: {
-        where: activeUnexpiredWhere(now),
-        orderBy: { amountPaise: 'asc' },
-        take: 1,
-        select: { amountPaise: true, supplierId: true },
-      },
-    },
-    orderBy: { liveEndsAt: 'asc' },
-    take: 50,
-  });
+  const stocked = canonicalizeSupplierCategories(profile?.categories ?? []).slugs;
+  const matchValues = categoryMatchValues(stocked);
+  const requests =
+    matchValues.length === 0
+      ? []
+      : await prisma.bidRequest.findMany({
+          where: {
+            status: 'open',
+            liveEndsAt: { gt: now },
+            items: { some: { productCategory: { in: matchValues } } },
+          },
+          select: {
+            id: true,
+            batchCode: true,
+            budgetPaise: true,
+            liveEndsAt: true,
+            extendCount: true,
+            lat: true,
+            lng: true,
+            items: {
+              select: {
+                id: true,
+                name: true,
+                quantity: true,
+                unit: true,
+                productCategory: true,
+                gradeHint: true,
+                catalogCategory: true,
+                catalogItemSlug: true,
+                minimumOrderQty: true,
+                minimumOrderUnit: true,
+                packSize: true,
+                status: true,
+              },
+            },
+            bids: {
+              where: activeUnexpiredWhere(now),
+              orderBy: { amountPaise: 'asc' },
+              take: 1,
+              select: { amountPaise: true, supplierId: true },
+            },
+          },
+          orderBy: { liveEndsAt: 'asc' },
+          take: 50,
+        });
 
   const feed = requests.map((r: (typeof requests)[number]) => {
     let distanceKm: number | null = null;
@@ -284,7 +308,8 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       remaining,
       ...(quotaInfo.reason ? { reason: quotaInfo.reason } : {}),
     },
-    categories: profile?.categories ?? [],
+    categories: stocked,
+    untagged: stocked.length === 0,
   };
   await cacheSet(cacheKey, payload, 8_000);
   res.setHeader('X-Cache', 'MISS');
@@ -384,6 +409,25 @@ bidzoneRouter.post(
     const coveredItems = isItemized
       ? bidRequest.items.filter((i) => coveredItemIds.includes(i.id))
       : bidRequest.items;
+
+    const stocked = canonicalizeSupplierCategories(profile.categories).slugs;
+    if (stocked.length === 0) {
+      throw new AppError(
+        400,
+        'STOCK_REQUIRED',
+        'Pick at least one category you stock before bidding',
+      );
+    }
+    for (const item of coveredItems) {
+      if (!supplierStocksCategory(stocked, item.productCategory)) {
+        const label = getCategoryDef(item.productCategory)?.label ?? item.name;
+        throw new AppError(
+          400,
+          'CATEGORY_NOT_STOCKED',
+          `You don't stock ${label}. Update What you stock to bid on ${item.name}.`,
+        );
+      }
+    }
 
     for (const item of coveredItems) {
       if (item.minimumOrderQty == null || !item.minimumOrderUnit) continue;
@@ -1282,11 +1326,34 @@ bidzoneRouter.post(
       ...[...bidById.values()].map((w) => invalidateSupplierLists(w.supplier.userId)),
     ]);
 
+    const presentedOrders = orders.map((order) => {
+      const winner = [...bidById.values()].find((b) => b.id === order.bidId);
+      const covered = new Set(order.coveredItemIds ?? []);
+      const items = bidRequest.items
+        .filter((i) => covered.has(i.id))
+        .map((i) => ({
+          id: i.id,
+          name: i.name,
+          quantity: i.quantity,
+          unit: i.unit,
+          packSize: i.packSize,
+        }));
+      return {
+        ...order,
+        supplierLabel: publicSupplierLabel(winner?.supplier),
+        items,
+        batchCode: bidRequest.batchCode,
+      };
+    });
+
     res.json({
       bidIds,
-      orders,
+      orders: presentedOrders,
       bindOnAccept: true,
-      message: `Awarded to ${orders.length} supplier${orders.length === 1 ? '' : 's'}.`,
+      message:
+        presentedOrders.length === 1
+          ? `1 order created for ${presentedOrders[0]?.supplierLabel ?? 'the supplier'}.`
+          : `${presentedOrders.length} orders created — one per supplier.`,
     });
   },
 );

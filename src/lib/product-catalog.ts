@@ -58,7 +58,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 1,
     moqQty: 5,
     moqUnit: 'kg',
-    items: items('dry_staples', [
+    items: items('rice_flours', [
       'Basmati Rice',
       'Aged Basmati (1121)',
       'Sona Masuri Rice',
@@ -91,7 +91,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 2,
     moqQty: 1,
     moqUnit: 'kg',
-    items: items('dry_staples', [
+    items: items('dals_pulses', [
       'Toor Dal',
       'Arhar Dal',
       'Moong Dal',
@@ -121,7 +121,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 3,
     moqQty: 500,
     moqUnit: 'g',
-    items: items('dry_staples', [
+    items: items('spices_sugar', [
       'Turmeric',
       'Red Chilli Powder',
       'Kashmiri Chilli Powder',
@@ -168,7 +168,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 4,
     moqQty: 5,
     moqUnit: 'kg',
-    items: items('dry_staples', [
+    items: items('rice_flours', [
       'Wheat Atta',
       'Chakki Atta',
       'Multigrain Atta',
@@ -199,7 +199,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 5,
     moqQty: 5,
     moqUnit: 'L',
-    items: items('cooking_oils', [
+    items: items('oils_fats', [
       'Mustard Oil',
       'Sunflower Oil',
       'Soybean Oil',
@@ -225,7 +225,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     moqUnit: 'L',
     items: mix([
       {
-        productCategory: 'ultra_fresh_dairy',
+        productCategory: 'dairy',
         names: [
           'Full Cream Milk',
           'Toned Milk',
@@ -235,6 +235,8 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
           'Dahi',
           'Greek Yogurt',
           'Paneer',
+          'Fresh Cream',
+          'Whipping Cream',
           'Buttermilk',
           'Lassi',
           'Flavoured Lassi',
@@ -247,13 +249,16 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
         ],
       },
       {
-        productCategory: 'chilled_fats',
+        productCategory: 'oils_fats',
         names: [
-          'Fresh Cream',
-          'Whipping Cream',
           'Cow Ghee',
           'Buffalo Ghee',
           'Desi Ghee',
+        ],
+      },
+      {
+        productCategory: 'chilled_dairy',
+        names: [
           'Margarine',
           'Butter',
         ],
@@ -268,7 +273,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     moqUnit: 'kg',
     items: mix([
       {
-        productCategory: 'chilled_fats',
+        productCategory: 'chilled_dairy',
         names: [
           'Salted Butter',
           'Unsalted Butter',
@@ -278,7 +283,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
         ],
       },
       {
-        productCategory: 'chilled_cheese',
+        productCategory: 'chilled_dairy',
         names: [
           'Mozzarella Cheese',
           'Cheddar Cheese',
@@ -304,41 +309,51 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 8,
     moqQty: 1,
     moqUnit: 'kg',
-    items: items('fresh_proteins', [
-      'Whole Chicken',
-      'Chicken Boneless',
-      'Chicken Breast',
-      'Chicken Thigh',
-      'Chicken Leg',
-      'Chicken Drumstick',
-      'Chicken Wings',
-      'Chicken Lollipop',
-      'Chicken Mince',
-      'Chicken Liver',
-      'Mutton Biryani Cut',
-      'Mutton Boneless',
-      'Mutton Raan',
-      'Mutton Chops',
-      'Mutton Shank',
-      'Mutton Mince',
-      'Paya',
-      'Mutton Liver',
-      'Rohu',
-      'Katla',
-      'Basa',
-      'Bhetki',
-      'Magur',
-      'Singhi',
-      'Pabda',
-      'Hilsa',
-      'Pomfret',
-      'Prawns',
-      'Shrimp',
-      'Crab',
-      'Squid',
-      'Poultry Eggs',
-      'Chicken Eggs',
-      'Duck Eggs',
+    items: mix([
+      {
+        productCategory: 'meat_poultry',
+        names: [
+          'Whole Chicken',
+          'Chicken Boneless',
+          'Chicken Breast',
+          'Chicken Thigh',
+          'Chicken Leg',
+          'Chicken Drumstick',
+          'Chicken Wings',
+          'Chicken Lollipop',
+          'Chicken Mince',
+          'Chicken Liver',
+          'Mutton Biryani Cut',
+          'Mutton Boneless',
+          'Mutton Raan',
+          'Mutton Chops',
+          'Mutton Shank',
+          'Mutton Mince',
+          'Paya',
+          'Mutton Liver',
+        ],
+      },
+      {
+        productCategory: 'seafood_eggs',
+        names: [
+          'Rohu',
+          'Katla',
+          'Basa',
+          'Bhetki',
+          'Magur',
+          'Singhi',
+          'Pabda',
+          'Hilsa',
+          'Pomfret',
+          'Prawns',
+          'Shrimp',
+          'Crab',
+          'Squid',
+          'Poultry Eggs',
+          'Chicken Eggs',
+          'Duck Eggs',
+        ],
+      },
     ]),
   },
   {
@@ -347,7 +362,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 9,
     moqQty: 5,
     moqUnit: 'kg',
-    items: items('fresh_produce', [
+    items: items('fruits', [
       'Apple',
       'Banana',
       'Orange',
@@ -384,7 +399,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 10,
     moqQty: 5,
     moqUnit: 'kg',
-    items: items('dry_staples', [
+    items: items('dry_fruits_nuts', [
       'Almonds',
       'Cashews',
       'Pistachios',
@@ -421,7 +436,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 11,
     moqQty: 10,
     moqUnit: 'kg',
-    items: items('fresh_produce', [
+    items: items('vegetables', [
       'Onion',
       'Potato',
       'Tomato',
@@ -468,7 +483,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 12,
     moqQty: 2,
     moqUnit: 'pcs',
-    items: items('dry_staples', [
+    items: items('tea_coffee_bakery_goods', [
       'Yeast',
       'Baking Powder',
       'Baking Soda',
@@ -498,7 +513,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 13,
     moqQty: 5,
     moqUnit: 'kg',
-    items: items('dry_staples', [
+    items: items('chocolate_cocoa', [
       'Dark Chocolate',
       'Milk Chocolate',
       'White Chocolate',
@@ -595,7 +610,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     moqUnit: 'kg',
     items: mix([
       {
-        productCategory: 'dry_staples',
+        productCategory: 'tea_coffee_bakery_goods',
         names: [
           'Assam Tea',
           'Darjeeling Tea',
@@ -609,11 +624,6 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
           'Lemon Tea',
           'Herbal Tea',
           'Tea Bags',
-        ],
-      },
-      {
-        productCategory: 'coffee_roasted',
-        names: [
           'Instant Coffee',
           'Filter Coffee Powder',
           'Coffee',
@@ -633,7 +643,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 17,
     moqQty: 2,
     moqUnit: 'pcs',
-    items: items('packaged_beverages', [
+    items: items('beverages', [
       'Soft Drinks',
       'Soda',
       'Tonic Water',
@@ -666,7 +676,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 18,
     moqQty: 2,
     moqUnit: 'pcs',
-    items: items('dry_staples', [
+    items: items('packaging_disposables', [
       'Aluminium Foil',
       'Commercial Aluminium Foil Rolls',
       'Baking Paper',
@@ -726,7 +736,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 19,
     moqQty: 2,
     moqUnit: 'pcs',
-    items: items('dry_staples', [
+    items: items('cleaning_utility', [
       'Dishwash Liquid',
       'Dishwash Gel',
       'Dishwash Powder',
@@ -754,7 +764,7 @@ export const PRODUCT_CATALOG: CatalogCategoryDef[] = [
     sortOrder: 20,
     moqQty: 2,
     moqUnit: 'pcs',
-    items: items('dry_staples', [
+    items: items('cleaning_utility', [
       'Mop Heads',
       'Mops',
       'Floor Squeegees',

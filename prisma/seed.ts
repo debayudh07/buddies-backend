@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { PRODUCT_CATEGORIES } from '../src/lib/product-categories';
+import { PRODUCT_CATEGORIES, getCategoryDef } from '../src/lib/product-categories';
 
 const prisma = new PrismaClient();
 
@@ -49,29 +49,33 @@ async function main() {
   }
 
   // Keep legacy slugs mapped for any old claims / items (same policy as closest modern group)
-  const legacyWindows = [
-    {
-      productCategory: 'ultra_perishables_dairy',
-      windowHours: 1,
-      validReasons: ['cold_chain_break', 'leakage', 'low_rsl', 'expired'],
-      exampleItems: 'Legacy alias → ultra_fresh_dairy / bakery',
-    },
-    {
-      productCategory: 'chilled_frozen_fmcg',
-      windowHours: 4,
-      validReasons: ['thawed', 'bloating', 'broken_seal', 'expired'],
-      exampleItems: 'Legacy alias → frozen_food / chilled_cheese / chilled_fats',
-    },
-    {
-      productCategory: 'ambient_liquids',
-      windowHours: 24,
-      validReasons: ['cap_damage', 'crystallization', 'low_rsl', 'leakage'],
-      exampleItems: 'Legacy alias → syrups_crushes / cooking_oils',
-    },
+  const legacySlugs = [
+    'ultra_fresh_dairy',
+    'ultra_fresh_bakery',
+    'fresh_proteins',
+    'fresh_produce',
+    'chilled_cheese',
+    'chilled_fats',
+    'coffee_roasted',
+    'cooking_oils',
+    'dry_staples',
+    'packaged_beverages',
+    'ultra_perishables_dairy',
+    'ultra_fresh_perishables',
+    'chilled_frozen_fmcg',
+    'ambient_liquids',
   ];
-  for (const row of legacyWindows) {
+  for (const slug of legacySlugs) {
+    const def = getCategoryDef(slug);
+    if (!def) continue;
+    const row = {
+      productCategory: slug,
+      windowHours: def.windowHours,
+      validReasons: def.validReasons,
+      exampleItems: `Legacy alias → ${def.productCategory}`,
+    };
     await prisma.returnWindowMatrix.upsert({
-      where: { productCategory: row.productCategory },
+      where: { productCategory: slug },
       create: row,
       update: row,
     });
@@ -134,7 +138,7 @@ async function main() {
       slug: 'return-windows',
       title: 'Return windows by category',
       bodyMd:
-        'Ultra-fresh dairy/bakery & proteins **1h**, produce **2h**, chilled/frozen **4h**, ambient liquids/oils/coffee/syrups/beverages **24h**, dry staples **48h**. Media required. No change-of-mind.',
+        'Hidden-defect windows: dairy / meat / seafood / bakery **1h**, vegetables & fruits **2h**, chilled dairy & frozen **4h**, oils / sauces / syrups / beverages **24h**, rice / dals / spices / dry fruits / tea-coffee / chocolate / packaging / cleaning **48h**. Photo/video evidence required. No change-of-mind.',
       audience: 'both' as const,
       categoryId: returnsCat?.id,
     },
@@ -142,7 +146,7 @@ async function main() {
       slug: 'shelf-life-matrix',
       title: 'Shelf life & minimum RSL matrix',
       bodyMd:
-        'Each cart category has a typical total shelf life and **Minimum RSL at delivery** (e.g. milk/curd 2d, bread 3d, proteins 1d + 12h harvest, cheese 60d, frozen 120d, dry staples 180d). Suppliers must meet or beat Min RSL for the item category.',
+        'Each cart category has a typical total shelf life and **Minimum RSL at delivery** (e.g. dairy 2d, bakery 3d, meat/seafood 1d, chilled dairy 60d, frozen 120d, oils/sauces 60d, dry goods 180d). Suppliers must meet or beat Min RSL for the item category.',
       audience: 'both' as const,
       categoryId: returnsCat?.id,
     },

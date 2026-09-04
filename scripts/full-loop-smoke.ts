@@ -203,7 +203,7 @@ async function main() {
     publicLabel: 'Fresh Mart Peenya',
     lat: 13.03,
     lng: 77.52,
-    categories: ['fresh_produce', 'ultra_perishables_dairy'],
+    categories: ['vegetables', 'dairy'],
   });
   await api('kyc submit', 'POST', '/supplier/kyc/submit', S);
   try {
@@ -235,7 +235,7 @@ async function main() {
         name: 'Tomatoes',
         quantity: 10,
         unit: 'kg',
-        productCategory: 'fresh_produce',
+        productCategory: 'vegetables',
         gradeHint: 'A',
       },
     ],
@@ -361,7 +361,7 @@ async function main() {
     'POST',
     `/orders/${orderId}/return-claims`,
     C,
-    { reasonCode: 'leakage', productCategory: 'fresh_produce', lineItemIds: [] },
+    { reasonCode: 'leakage', productCategory: 'vegetables', lineItemIds: [] },
     400,
   );
   await expectHttp(
@@ -369,7 +369,7 @@ async function main() {
     'POST',
     `/orders/${orderId}/return-claims`,
     C,
-    { reasonCode: 'leakage', productCategory: 'fresh_produce', lineItemIds: ['not-an-item'] },
+    { reasonCode: 'leakage', productCategory: 'vegetables', lineItemIds: ['not-an-item'] },
     400,
   );
   await expectHttp(
@@ -383,7 +383,7 @@ async function main() {
 
   const claim = await api('create return', 'POST', `/orders/${orderId}/return-claims`, C, {
     reasonCode: 'leakage',
-    productCategory: 'fresh_produce',
+    productCategory: 'vegetables',
     lineItemIds: returnLineIds,
     notes: 'Puncture on bag',
   });
@@ -396,11 +396,14 @@ async function main() {
     'leak.png',
     'image/png',
   );
-  await api('return evidence', 'POST', `/return-claims/${claimId}/evidence`, C, {
-    storageRef: evidenceUpload.storageRef,
-    mediaType: evidenceUpload.mediaType,
-    defectNote: 'Leak visible',
-  });
+  for (const lineId of returnLineIds) {
+    await api(`return evidence ${lineId.slice(0, 8)}`, 'POST', `/return-claims/${claimId}/evidence`, C, {
+      storageRef: evidenceUpload.storageRef,
+      mediaType: evidenceUpload.mediaType,
+      defectNote: 'Leak visible',
+      lineItemId: lineId,
+    });
+  }
   await api('signed url', 'GET', `/uploads/signed-url?storageRef=${encodeURIComponent(evidenceUpload.storageRef)}`, C);
   await api('return submit', 'POST', `/return-claims/${claimId}/submit`, C);
 
@@ -448,16 +451,25 @@ async function main() {
   log('\n11c. Return: replacement loop');
   const claim2 = await api('create replacement return', 'POST', `/orders/${orderId}/return-claims`, C, {
     reasonCode: 'leakage',
-    productCategory: 'fresh_produce',
+    productCategory: 'vegetables',
     lineItemIds: returnLineIds,
     notes: 'Need replacement crate',
   });
   const claim2Id = claim2.claim?.id ?? claim2.id;
-  await api('replacement evidence', 'POST', `/return-claims/${claim2Id}/evidence`, C, {
-    storageRef: evidenceUpload.storageRef,
-    mediaType: evidenceUpload.mediaType,
-    defectNote: 'Swap needed',
-  });
+  for (const lineId of returnLineIds) {
+    await api(
+      `replacement evidence ${lineId.slice(0, 8)}`,
+      'POST',
+      `/return-claims/${claim2Id}/evidence`,
+      C,
+      {
+        storageRef: evidenceUpload.storageRef,
+        mediaType: evidenceUpload.mediaType,
+        defectNote: 'Swap needed',
+        lineItemId: lineId,
+      },
+    );
+  }
   await api('replacement submit', 'POST', `/return-claims/${claim2Id}/submit`, C);
   await api('replacement accept', 'POST', `/return-claims/${claim2Id}/supplier-decision`, S, {
     decision: 'accept',

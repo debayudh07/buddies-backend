@@ -12,6 +12,9 @@ import { notifyMany } from '../../lib/notify';
 import {
   categorySlugs,
   normalizeProductCategory,
+  requestProductCategories,
+  categoryMatchValues,
+  getCategoryDef,
 } from '../../lib/product-categories';
 import {
   assertCartRule,
@@ -228,17 +231,32 @@ demandRouter.post(
       include: { items: true },
     });
 
+    const productCategories = requestProductCategories(bidRequest.items);
     emitBidzone('all', 'demand.request_created', {
       id: bidRequest.id,
       batchCode: bidRequest.batchCode,
       liveEndsAt: bidRequest.liveEndsAt,
       itemCount: bidRequest.items.length,
+      productCategories,
     });
 
-    // Notify verified suppliers off the hot path (response must not wait on fanout).
+    // Notify verified suppliers who stock any of this request's categories.
+    const matchValues = categoryMatchValues(productCategories);
+    const labels = productCategories
+      .map((c) => getCategoryDef(c)?.label ?? c)
+      .slice(0, 2);
+    const pushBody =
+      labels.length > 0
+        ? `New ${labels.join(' + ')} bid nearby`
+        : `Batch ${bidRequest.batchCode} is open nearby`;
     void prisma.supplierProfile
       .findMany({
-        where: { kycStatus: 'verified' },
+        where: {
+          kycStatus: 'verified',
+          ...(matchValues.length > 0
+            ? { categories: { hasSome: matchValues } }
+            : { id: { in: [] } }),
+        },
         select: { userId: true },
         take: 100,
       })
@@ -246,7 +264,7 @@ demandRouter.post(
         notifyMany(
           suppliers.map((s) => s.userId),
           'New Bidzone demand',
-          `Batch ${bidRequest.batchCode} is open nearby`,
+          pushBody,
           { bidRequestId: bidRequest.id, type: 'bid' },
         ),
       )

@@ -135,6 +135,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
         deliveryLng: true,
         deliveryAddress: true,
         deliveredAt: true,
+        bidRequestId: true,
         coveredItemIds: true,
         createdAt: true,
         updatedAt: true,
@@ -148,6 +149,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
               select: {
                 id: true,
                 publicLabel: true,
+                businessName: true,
                 rating: true,
                 ratingCount: true,
                 onTimeRate: true,
@@ -160,6 +162,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
         bidRequest: {
           select: {
             id: true,
+            batchCode: true,
             deliveryWindow: true,
             deliveryAddress: true,
             budgetPaise: true,
@@ -240,9 +243,17 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
 const listOrderInclude = {
   offlinePayment: { select: { status: true, id: true } },
   trackingSession: { select: { id: true, active: true, lastPointAt: true } },
-  bid: { select: { amountPaise: true, grade: true } },
+  bid: {
+    select: {
+      amountPaise: true,
+      grade: true,
+      supplier: { select: { publicLabel: true, businessName: true } },
+    },
+  },
   bidRequest: {
     select: {
+      id: true,
+      batchCode: true,
       deliveryWindow: true,
       deliveryAddress: true,
       items: {
@@ -262,14 +273,30 @@ const listOrderInclude = {
   },
 } as const;
 
+type PresentableSupplier = {
+  publicLabel?: string | null;
+  businessName?: string | null;
+};
+
 /** Flatten fields the Flutter apps expect (totalPaise, items, delivery helpers). */
 function presentOrder<T extends {
+  id?: string;
+  orderCode?: string;
+  status?: string;
+  bidRequestId?: string;
   deliveryLat?: number | null;
   deliveryLng?: number | null;
   deliveryAddress?: string | null;
   coveredItemIds?: string[];
-  bid?: { amountPaise?: number; grade?: string; rslDaysAtDelivery?: number } | null;
+  bid?: {
+    amountPaise?: number;
+    grade?: string;
+    rslDaysAtDelivery?: number;
+    supplier?: PresentableSupplier | null;
+  } | null;
   bidRequest?: {
+    id?: string;
+    batchCode?: string | null;
     deliveryWindow?: string | null;
     deliveryAddress?: string | null;
     items?: Array<{
@@ -321,7 +348,62 @@ function presentOrder<T extends {
     items,
     deliveryWindow: order.bidRequest?.deliveryWindow ?? null,
     hasDeliveryPin,
+    bidRequestId: order.bidRequestId ?? order.bidRequest?.id ?? null,
+    batchCode: order.bidRequest?.batchCode ?? null,
+    supplierLabel: publicSupplierLabel(order.bid?.supplier),
   };
+}
+
+async function siblingOrdersFor(
+  order: {
+    id: string;
+    bidRequestId?: string;
+    bidRequest?: { id?: string } | null;
+  },
+  viewerUserId: string,
+) {
+  const bidRequestId = order.bidRequestId ?? order.bidRequest?.id;
+  if (!bidRequestId) return [];
+  const rows = await prisma.order.findMany({
+    where: {
+      bidRequestId,
+      id: { not: order.id },
+      OR: [{ consumerUserId: viewerUserId }, { supplierUserId: viewerUserId }],
+    },
+    orderBy: { createdAt: 'asc' },
+    take: 8,
+    include: {
+      bid: { select: { supplier: { select: { publicLabel: true, businessName: true } } } },
+      bidRequest: {
+        select: {
+          batchCode: true,
+          items: {
+            select: {
+              id: true,
+              name: true,
+              quantity: true,
+              unit: true,
+              productCategory: true,
+              catalogCategory: true,
+              catalogItemSlug: true,
+              packSize: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  return rows.map((row) => {
+    const presented = presentOrder(row);
+    return {
+      id: presented.id,
+      orderCode: presented.orderCode,
+      status: presented.status,
+      items: presented.items,
+      supplierLabel: presented.supplierLabel,
+      batchCode: presented.batchCode,
+    };
+  });
 }
 
 ordersRouter.get('/consumer/orders', authenticate, requireRole('consumer'), async (req, res) => {
@@ -377,8 +459,11 @@ ordersRouter.get('/orders/:id', authenticate, async (req, res) => {
   }
   const order = await getOrderForUser(id, req.user!.id, req.user!.role);
   const base = presentOrder(order);
-  const enriched = await enrichOrderWithRatings(base, req.user!.id);
-  const payload = { order: enriched };
+  const [enriched, siblingOrders] = await Promise.all([
+    enrichOrderWithRatings(base, req.user!.id),
+    siblingOrdersFor(order, req.user!.id),
+  ]);
+  const payload = { order: { ...enriched, siblingOrders } };
   await cacheSet(cacheKey, payload, ORDER_DETAIL_TTL_MS);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);

@@ -538,6 +538,8 @@ model ReturnClaim {
 model ReturnEvidence {
   id           String   @id @default(uuid())
   claimId      String
+  /// Order line this photo belongs to (so suppliers can match photo → product).
+  lineItemId   String?
   storageRef   String
   mediaType    String
   batchNumber  String?
@@ -546,6 +548,8 @@ model ReturnEvidence {
   createdAt    DateTime @default(now())
 
   claim ReturnClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId, lineItemId])
 }
 
 model ShelfLifeMatrix {

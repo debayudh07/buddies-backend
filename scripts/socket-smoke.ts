@@ -137,7 +137,7 @@ async function main() {
     publicLabel: 'Socket Mart',
     lat: 13.0,
     lng: 77.5,
-    categories: ['fresh_produce'],
+    categories: ['vegetables'],
   });
   try {
     await api('POST', '/supplier/kyc/submit', S);
@@ -159,7 +159,7 @@ async function main() {
   const br = await api('POST', '/consumer/bid-requests', C, {
     privacyAccepted: true,
     budgetPaise: 300000,
-    items: [{ name: 'Onions', quantity: 5, unit: 'kg', productCategory: 'fresh_produce' }],
+    items: [{ name: 'Onions', quantity: 5, unit: 'kg', productCategory: 'vegetables' }],
     lat: 12.97,
     lng: 77.59,
   });
