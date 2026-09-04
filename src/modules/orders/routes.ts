@@ -28,6 +28,7 @@ import {
   ewmaTrustFromStars,
   supplierPublicRating,
 } from '../../lib/ratings';
+import { deliverySlaHours } from '../../lib/delivery-sla';
 
 export const ordersRouter = Router();
 
@@ -135,6 +136,8 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
         deliveryLng: true,
         deliveryAddress: true,
         deliveredAt: true,
+        slaDeadlineAt: true,
+        slaStatus: true,
         bidRequestId: true,
         coveredItemIds: true,
         createdAt: true,
@@ -145,6 +148,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
             amountPaise: true,
             grade: true,
             rslDaysAtDelivery: true,
+            promisedDeliveryAt: true,
             supplier: {
               select: {
                 id: true,
@@ -164,6 +168,8 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
             id: true,
             batchCode: true,
             deliveryWindow: true,
+            preferredDeliverBy: true,
+            durationHours: true,
             deliveryAddress: true,
             budgetPaise: true,
             items: {
@@ -247,6 +253,7 @@ const listOrderInclude = {
     select: {
       amountPaise: true,
       grade: true,
+      promisedDeliveryAt: true,
       supplier: { select: { publicLabel: true, businessName: true } },
     },
   },
@@ -255,6 +262,8 @@ const listOrderInclude = {
       id: true,
       batchCode: true,
       deliveryWindow: true,
+      preferredDeliverBy: true,
+      durationHours: true,
       deliveryAddress: true,
       items: {
         select: {
@@ -292,12 +301,15 @@ function presentOrder<T extends {
     amountPaise?: number;
     grade?: string;
     rslDaysAtDelivery?: number;
+    promisedDeliveryAt?: Date | string | null;
     supplier?: PresentableSupplier | null;
   } | null;
   bidRequest?: {
     id?: string;
     batchCode?: string | null;
     deliveryWindow?: string | null;
+    preferredDeliverBy?: Date | string | null;
+    durationHours?: number | null;
     deliveryAddress?: string | null;
     items?: Array<{
       id?: string;
@@ -347,6 +359,9 @@ function presentOrder<T extends {
     totalPaise,
     items,
     deliveryWindow: order.bidRequest?.deliveryWindow ?? null,
+    preferredDeliverBy: order.bidRequest?.preferredDeliverBy ?? null,
+    promisedDeliveryAt: order.bid?.promisedDeliveryAt ?? null,
+    deliverySlaHours: deliverySlaHours(order.bidRequest?.durationHours),
     hasDeliveryPin,
     bidRequestId: order.bidRequestId ?? order.bidRequest?.id ?? null,
     batchCode: order.bidRequest?.batchCode ?? null,

@@ -17,6 +17,11 @@ import { shelfRulesForItems, canonicalizeSupplierCategories, categoryMatchValues
 import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 import { publicSupplierLabel } from '../../lib/user-present';
 import { cacheGet, cacheSet, invalidateBidzoneFeeds, invalidateSupplierLists, invalidateConsumerLists, invalidateDemandDetail } from '../../lib/response-cache';
+import {
+  assertWithinDeliverySla,
+  deliverySlaHours,
+  parseIsoDate,
+} from '../../lib/delivery-sla';
 
 export const bidzoneRouter = Router();
 
@@ -243,6 +248,10 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
             extendCount: true,
             lat: true,
             lng: true,
+            createdAt: true,
+            durationHours: true,
+            deliveryWindow: true,
+            preferredDeliverBy: true,
             items: {
               select: {
                 id: true,
@@ -286,6 +295,11 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       budgetPaise: r.budgetPaise,
       liveEndsAt: r.liveEndsAt,
       extendCount: r.extendCount,
+      createdAt: r.createdAt,
+      durationHours: r.durationHours,
+      deliverySlaHours: deliverySlaHours(r.durationHours),
+      deliveryWindow: r.deliveryWindow,
+      preferredDeliverBy: r.preferredDeliverBy,
       items: r.items,
       shelfRules: shelfRulesForItems(r.items),
       distanceKm,
@@ -324,6 +338,7 @@ const placeBidSchema = z.object({
   shelfLifeDays: z.coerce.number().int().positive().default(5),
   rslDaysAtDelivery: z.coerce.number().int().nonnegative().default(2),
   notes: z.string().optional(),
+  promisedDeliveryAt: z.coerce.date().optional(),
   lines: z.array(z.object({
     bidRequestItemId: z.string().min(1),
     amountPaise: z.coerce.number().int().positive(),
@@ -358,6 +373,19 @@ bidzoneRouter.post(
     );
     if (bidRequest.status !== 'open') throw new AppError(400, 'NOT_OPEN', 'Auction not open');
     if (bidRequest.liveEndsAt < new Date()) throw new AppError(400, 'EXPIRED', 'Auction window ended');
+
+    const promisedDeliveryAt = body.promisedDeliveryAt
+      ? parseIsoDate(body.promisedDeliveryAt) ?? body.promisedDeliveryAt
+      : null;
+    if (promisedDeliveryAt) {
+      assertWithinDeliverySla({
+        at: promisedDeliveryAt,
+        createdAt: bidRequest.createdAt,
+        durationHours: bidRequest.durationHours,
+        label: 'Your delivery time',
+        after: new Date(),
+      });
+    }
 
     if (!body.grade || body.rslDaysAtDelivery < 0) {
       throw new AppError(400, 'RSL_REQUIRED', 'Grade and RSL required');
@@ -573,6 +601,7 @@ bidzoneRouter.post(
           shelfLifeDays,
           rslDaysAtDelivery: body.rslDaysAtDelivery,
           notes: body.notes,
+          promisedDeliveryAt,
           score,
           scoreBreakdown: breakdown,
           distanceKm,
@@ -802,6 +831,9 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       shelfLifeDays: b.shelfLifeDays,
       rslDaysAtDelivery: b.rslDaysAtDelivery,
       notes: b.notes,
+      promisedDeliveryAt: b.promisedDeliveryAt,
+      deliverySlaHours: deliverySlaHours(b.bidRequest.durationHours),
+      preferredDeliverBy: b.bidRequest.preferredDeliverBy,
       status: stillLive ? b.status : b.status === 'active' ? 'expired' : b.status,
       statusHint,
       score: b.score,

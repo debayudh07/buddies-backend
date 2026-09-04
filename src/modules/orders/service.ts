@@ -1,8 +1,8 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
-import { config } from '../../config';
 import { AppError, assertFound } from '../../lib/errors';
 import { emitChat } from '../../socket';
+import { deliverySlaHours } from '../../lib/delivery-sla';
 
 function orderCode() {
   return `ORD-${Date.now().toString().slice(-8)}`;
@@ -50,7 +50,9 @@ async function insertOrderFromBid(
   });
   if (existing) return existing;
 
-  const slaDeadlineAt = new Date(Date.now() + config.slaHours * 3600 * 1000);
+  const slaDeadlineAt = new Date(
+    Date.now() + deliverySlaHours(bid.bidRequest.durationHours) * 3600 * 1000,
+  );
   const consumer = bid.bidRequest.consumer;
   const coveredItems = bid.bidRequest.items.filter((i) => coveredItemIds.includes(i.id));
 

@@ -24,6 +24,12 @@ import {
 } from '../../lib/product-catalog';
 import { invalidateBidzoneFeeds, invalidateConsumerLists, invalidateDemandDetail, cacheGet, cacheSet } from '../../lib/response-cache';
 import { assertPaymentBacklog } from '../../lib/payment-backlog';
+import {
+  ALLOWED_DURATION_HOURS,
+  assertWithinDeliverySla,
+  parseIsoDate,
+  withDeliverySla,
+} from '../../lib/delivery-sla';
 
 const knownCategory = z
   .string()
@@ -106,8 +112,15 @@ function itemCreateData(i: CanonicalLine) {
 const createSchema = z.object({
   budgetPaise: z.number().int().positive().optional(),
   /** Auction length in hours. Use `0` for Instant (30 minutes). */
-  durationHours: z.number().int().min(0).max(7 * 24).default(24),
+  durationHours: z
+    .number()
+    .int()
+    .refine((h) => (ALLOWED_DURATION_HOURS as readonly number[]).includes(h), {
+      message: `durationHours must be one of ${ALLOWED_DURATION_HOURS.join(', ')}`,
+    })
+    .default(24),
   deliveryWindow: z.string().optional(),
+  preferredDeliverBy: z.coerce.date().optional(),
   privacyAccepted: z.boolean(),
   addressId: z.string().optional(),
   lat: z.number().optional(),
@@ -135,12 +148,20 @@ const itemSchema = catalogItemSchema;
 const patchSchema = z
   .object({
     deliveryWindow: z.string().min(1).optional(),
+    preferredDeliverBy: z.coerce.date().optional(),
     addressId: z.string().uuid().optional(),
     items: z.array(itemSchema).min(1).optional(),
   })
-  .refine((b) => b.deliveryWindow != null || b.addressId != null || b.items != null, {
-    message: 'Provide deliveryWindow, addressId, and/or items',
-  });
+  .refine(
+    (b) =>
+      b.deliveryWindow != null ||
+      b.preferredDeliverBy != null ||
+      b.addressId != null ||
+      b.items != null,
+    {
+      message: 'Provide deliveryWindow, addressId, and/or items',
+    },
+  );
 
 function itemsEditPolicy(createdAt: Date, now = new Date()) {
   const windowSec = config.auction.itemsEditWindowSec;
@@ -208,9 +229,22 @@ demandRouter.post(
 
     const canonicalItems = canonicalizeItems(body.items as IncomingCatalogLine[]);
 
+    const createdAt = new Date();
+    const preferredDeliverBy = body.preferredDeliverBy
+      ? parseIsoDate(body.preferredDeliverBy) ?? body.preferredDeliverBy
+      : null;
+    if (preferredDeliverBy) {
+      assertWithinDeliverySla({
+        at: preferredDeliverBy,
+        createdAt,
+        durationHours: body.durationHours,
+        label: 'Preferred delivery time',
+      });
+    }
+
     // Prefer consumer-selected duration; Instant (durationHours=0) = 30 minutes.
     const durationSec = auctionWindowSec(body.durationHours);
-    const liveEndsAt = new Date(Date.now() + durationSec * 1000);
+    const liveEndsAt = new Date(createdAt.getTime() + durationSec * 1000);
     const bidRequest = await prisma.bidRequest.create({
       data: {
         batchCode: batchCode(),
@@ -218,6 +252,7 @@ demandRouter.post(
         budgetPaise: body.budgetPaise,
         durationHours: body.durationHours,
         deliveryWindow: body.deliveryWindow,
+        preferredDeliverBy,
         deliveryAddress,
         privacyAccepted: true,
         liveEndsAt,
@@ -274,7 +309,7 @@ demandRouter.post(
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(req.user!.id),
     ]);
-    res.status(201).json({ bidRequest });
+    res.status(201).json({ bidRequest: withDeliverySla(bidRequest) });
   },
 );
 
@@ -302,6 +337,7 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
       liveEndsAt: true,
       createdAt: true,
       deliveryWindow: true,
+      preferredDeliverBy: true,
       items: {
         select: {
           id: true,
@@ -335,6 +371,7 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
           score: true,
           createdAt: true,
           expiresAt: true,
+          promisedDeliveryAt: true,
         },
         orderBy: { amountPaise: 'asc' },
         take: 10,
@@ -358,7 +395,7 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
     orderBy: { createdAt: 'desc' },
     take,
   });
-  const payload = { bidRequests };
+  const payload = { bidRequests: bidRequests.map((r) => withDeliverySla(r)) };
   await cacheSet(cacheKey, payload, 8_000);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);
@@ -449,7 +486,7 @@ demandRouter.get('/consumer/bid-requests/:id', authenticate, async (req, res) =>
   const itemsPolicy = itemsEditPolicy(bidRequest.createdAt, now);
   const payload = {
     bidRequest: {
-      ...rest,
+      ...withDeliverySla(rest),
       bids: (rest.bids ?? []).map((b) =>
         b.supplier
           ? {
@@ -544,10 +581,22 @@ demandRouter.patch(
         });
       }
 
+      if (body.preferredDeliverBy) {
+        assertWithinDeliverySla({
+          at: body.preferredDeliverBy,
+          createdAt: bidRequest.createdAt,
+          durationHours: bidRequest.durationHours,
+          label: 'Preferred delivery time',
+        });
+      }
+
       return tx.bidRequest.update({
         where: { id },
         data: {
           ...(body.deliveryWindow != null ? { deliveryWindow: body.deliveryWindow } : {}),
+          ...(body.preferredDeliverBy != null
+            ? { preferredDeliverBy: body.preferredDeliverBy }
+            : {}),
           ...(body.addressId
             ? {
                 deliveryAddress,
@@ -584,7 +633,7 @@ demandRouter.patch(
     ]);
     res.json({
       bidRequest: {
-        ...updated,
+        ...withDeliverySla(updated),
         editPolicy: {
           canEditMeta: canEditMeta(updated.status, updated.liveEndsAt),
           ...itemsPolicy,
@@ -724,7 +773,7 @@ demandRouter.post(
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(req.user!.id),
     ]);
-    res.status(201).json({ bidRequest });
+    res.status(201).json({ bidRequest: withDeliverySla(bidRequest) });
   },
 );
 

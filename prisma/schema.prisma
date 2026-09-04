@@ -230,6 +230,8 @@ model BidRequest {
   budgetPaise     Int?
   durationHours   Int              @default(24)
   deliveryWindow  String?
+  /// End of the consumer's preferred delivery clock window.
+  preferredDeliverBy DateTime?
   deliveryAddress String?
   privacyAccepted Boolean          @default(false)
   liveEndsAt      DateTime
@@ -306,6 +308,8 @@ model Bid {
   shelfLifeDays     Int
   rslDaysAtDelivery Int
   notes             String?
+  /// Supplier's promised drop-off time (must be within the request delivery SLA).
+  promisedDeliveryAt DateTime?
   status            BidStatus @default(active)
   score             Float     @default(0)
   scoreBreakdown    Json?
