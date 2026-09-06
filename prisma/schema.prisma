@@ -124,17 +124,17 @@ enum SlaStatus {
 }
 
 model User {
-  id            String   @id @default(uuid())
-  supabaseId    String?  @unique
-  phone         String?
-  email         String?
-  role          UserRole
-  displayName   String?
+  id                String    @id @default(uuid())
+  supabaseId        String?   @unique
+  phone             String?
+  email             String?
+  role              UserRole
+  displayName       String?
   /// Supabase Storage ref: "buddies-profiles/{userId}/profiles/{uuid}.jpg"
-  avatarStorageRef String?
+  avatarStorageRef  String?
   privacyAcceptedAt DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   consumerProfile ConsumerProfile?
   supplierProfile SupplierProfile?
@@ -181,9 +181,9 @@ model ConsumerProfile {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bidRequests  BidRequest[]
-  addresses    Address[]
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bidRequests BidRequest[]
+  addresses   Address[]
 }
 
 model Address {
@@ -223,19 +223,19 @@ model SupplierProfile {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bids  Bid[]
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bids Bid[]
 }
 
 model Subscription {
-  id        String           @id @default(uuid())
-  userId    String
-  plan      SubscriptionPlan
-  active    Boolean          @default(true)
-  startsAt  DateTime         @default(now())
-  endsAt    DateTime?
-  introPrice Boolean         @default(false)
-  createdAt DateTime         @default(now())
+  id         String           @id @default(uuid())
+  userId     String
+  plan       SubscriptionPlan
+  active     Boolean          @default(true)
+  startsAt   DateTime         @default(now())
+  endsAt     DateTime?
+  introPrice Boolean          @default(false)
+  createdAt  DateTime         @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -243,29 +243,29 @@ model Subscription {
 }
 
 model BidRequest {
-  id              String           @id @default(uuid())
-  batchCode       String           @unique
-  consumerId      String
-  status          BidRequestStatus @default(open)
-  budgetPaise     Int?
+  id                 String           @id @default(uuid())
+  batchCode          String           @unique
+  consumerId         String
+  status             BidRequestStatus @default(open)
+  budgetPaise        Int?
   /// Bidding time-to-live in hours (0 = Instant / 30 min).
-  durationHours   Int              @default(0)
+  durationHours      Int              @default(0)
   /// Consumer's chosen expected-delivery window in hours from creation.
-  slaHours        Int?
-  deliveryWindow  String?
+  slaHours           Int?
+  deliveryWindow     String?
   /// End of the consumer's preferred delivery clock window.
   preferredDeliverBy DateTime?
-  deliveryAddress String?
-  privacyAccepted Boolean          @default(false)
-  liveEndsAt      DateTime
-  extendCount     Int              @default(0)
-  minDecrementPaise Int            @default(10000)
-  winningBidId    String?
-  reorderOfId     String?
-  lat             Float?
-  lng             Float?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  deliveryAddress    String?
+  privacyAccepted    Boolean          @default(false)
+  liveEndsAt         DateTime
+  extendCount        Int              @default(0)
+  minDecrementPaise  Int              @default(10000)
+  winningBidId       String?
+  reorderOfId        String?
+  lat                Float?
+  lng                Float?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   consumer ConsumerProfile  @relation(fields: [consumerId], references: [id])
   items    BidRequestItem[]
@@ -278,22 +278,22 @@ model BidRequest {
 }
 
 model BidRequestItem {
-  id                String               @id @default(uuid())
-  bidRequestId      String
-  name              String
-  quantity          Float
-  unit              String
-  productCategory   String?
-  gradeHint         String?
-  status            BidRequestItemStatus @default(open)
+  id               String               @id @default(uuid())
+  bidRequestId     String
+  name             String
+  quantity         Float
+  unit             String
+  productCategory  String?
+  gradeHint        String?
+  status           BidRequestItemStatus @default(open)
   /// Commercial catalog category slug (The buddies.pdf)
-  catalogCategory   String?
-  catalogItemSlug   String?
-  minimumOrderQty   Float?
-  minimumOrderUnit  String?
+  catalogCategory  String?
+  catalogItemSlug  String?
+  minimumOrderQty  Float?
+  minimumOrderUnit String?
   /// Pack size: Small/Medium/Large for pcs, or 180ml/250ml/750ml/1L/2L for beverages.
-  packSize          String?
-  awardedBidId      String?
+  packSize         String?
+  awardedBidId     String?
 
   bidRequest BidRequest    @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
   bidLines   BidLineItem[]
@@ -322,67 +322,67 @@ model BidLineItem {
 }
 
 model Bid {
-  id                String    @id @default(uuid())
-  bidRequestId      String
-  supplierId        String
+  id                 String    @id @default(uuid())
+  bidRequestId       String
+  supplierId         String
   /// Total amount across all covered items (sum of bidLines or whole-basket if no lines)
-  amountPaise       Int
-  grade             String
-  shelfLifeDays     Int
-  rslDaysAtDelivery Int
-  notes             String?
+  amountPaise        Int
+  grade              String
+  shelfLifeDays      Int
+  rslDaysAtDelivery  Int
+  notes              String?
   /// Supplier's promised drop-off time (must be within the request delivery SLA).
   promisedDeliveryAt DateTime?
-  status            BidStatus @default(active)
-  score             Float     @default(0)
-  scoreBreakdown    Json?
-  distanceKm        Float?
-  consumerAckAt     DateTime?
-  supplierAckAt     DateTime?
-  acceptedAt        DateTime?
-  expiresAt         DateTime?
+  status             BidStatus @default(active)
+  score              Float     @default(0)
+  scoreBreakdown     Json?
+  distanceKm         Float?
+  consumerAckAt      DateTime?
+  supplierAckAt      DateTime?
+  acceptedAt         DateTime?
+  expiresAt          DateTime?
   /// IDs of BidRequestItems this bid covers. Empty = full-basket (legacy)
-  coveredItemIds    String[]  @default([])
+  coveredItemIds     String[]  @default([])
   /// true = supplier chose a subset of items; false = full basket bid
-  isPartial         Boolean   @default(false)
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  isPartial          Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
-  bidRequest   BidRequest        @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
-  supplier     SupplierProfile   @relation(fields: [supplierId], references: [id])
+  bidRequest   BidRequest       @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+  supplier     SupplierProfile  @relation(fields: [supplierId], references: [id])
   order        Order?
   bidLines     BidLineItem[]
-  awardedItems BidRequestItem[]  @relation("AwardedBidItems")
+  awardedItems BidRequestItem[] @relation("AwardedBidItems")
 
   @@index([bidRequestId, status])
   @@index([supplierId, status])
 }
 
 model Order {
-  id                String      @id @default(uuid())
-  orderCode         String      @unique
+  id               String      @id @default(uuid())
+  orderCode        String      @unique
   /// NOT unique — a single BidRequest can spawn multiple Orders (one per accepted partial bid)
-  bidRequestId      String
-  bidId             String      @unique
-  consumerUserId    String
-  supplierUserId    String
-  status            OrderStatus @default(placed)
-  slaDeadlineAt     DateTime?
-  slaStatus         SlaStatus   @default(on_track)
-  deliveryLat       Float?
-  deliveryLng       Float?
-  deliveryAddress   String?
-  inspectionEndsAt  DateTime?
-  consumerAckAt     DateTime?
-  supplierAckAt     DateTime?
-  deliveredAt       DateTime?
+  bidRequestId     String
+  bidId            String      @unique
+  consumerUserId   String
+  supplierUserId   String
+  status           OrderStatus @default(placed)
+  slaDeadlineAt    DateTime?
+  slaStatus        SlaStatus   @default(on_track)
+  deliveryLat      Float?
+  deliveryLng      Float?
+  deliveryAddress  String?
+  inspectionEndsAt DateTime?
+  consumerAckAt    DateTime?
+  supplierAckAt    DateTime?
+  deliveredAt      DateTime?
   /// Snapshot of covered item IDs at order creation (from bid.coveredItemIds)
-  coveredItemIds    String[]    @default([])
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
+  coveredItemIds   String[]    @default([])
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
-  bidRequest      BidRequest       @relation(fields: [bidRequestId], references: [id])
-  bid             Bid              @relation(fields: [bidId], references: [id])
+  bidRequest      BidRequest         @relation(fields: [bidRequestId], references: [id])
+  bid             Bid                @relation(fields: [bidId], references: [id])
   offlinePayment  OfflinePayment?
   digitalChallan  DigitalChallan?
   gstInvoice      GstInvoice?
@@ -409,7 +409,9 @@ model OrderStatusEvent {
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
-/** One optional mutual rating per party per closed order. */
+/**
+ * One optional mutual rating per party per closed order.
+ */
 model OrderRating {
   id         String   @id @default(uuid())
   orderId    String
@@ -430,31 +432,31 @@ model OrderRating {
 }
 
 model OfflinePayment {
-  id          String               @id @default(uuid())
-  orderId     String               @unique
-  status      OfflinePaymentStatus @default(not_started)
-  methodNote  String?
-  reference   String?
+  id            String               @id @default(uuid())
+  orderId       String               @unique
+  status        OfflinePaymentStatus @default(not_started)
+  methodNote    String?
+  reference     String?
   screenshotRef String?
-  initiatedAt DateTime?
-  markedPaidAt DateTime?
-  confirmedAt DateTime?
-  createdAt   DateTime             @default(now())
-  updatedAt   DateTime             @updatedAt
+  initiatedAt   DateTime?
+  markedPaidAt  DateTime?
+  confirmedAt   DateTime?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
 model DigitalChallan {
-  id              String   @id @default(uuid())
-  orderId         String   @unique
+  id               String    @id @default(uuid())
+  orderId          String    @unique
   lineSnapshotJson Json
-  signedAt        DateTime?
-  signedByUserId  String?
-  signatureRef    String?
-  isDraft         Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  signedAt         DateTime?
+  signedByUserId   String?
+  signatureRef     String?
+  isDraft          Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
@@ -471,11 +473,11 @@ model GstInvoice {
 }
 
 model TrackingSession {
-  id        String    @id @default(uuid())
-  orderId   String    @unique
-  active    Boolean   @default(true)
-  startedAt DateTime  @default(now())
-  endedAt   DateTime?
+  id          String    @id @default(uuid())
+  orderId     String    @unique
+  active      Boolean   @default(true)
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
   lastPointAt DateTime?
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
@@ -512,13 +514,13 @@ model ChatThread {
 }
 
 model ChatMessage {
-  id         String    @id @default(uuid())
-  threadId   String
-  senderId   String
-  body       String
-  imageRef   String?
-  readAt     DateTime?
-  createdAt  DateTime  @default(now())
+  id        String    @id @default(uuid())
+  threadId  String
+  senderId  String
+  body      String
+  imageRef  String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
 
   thread ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
   sender User       @relation(fields: [senderId], references: [id])
@@ -527,33 +529,33 @@ model ChatMessage {
 }
 
 model ReturnClaim {
-  id                 String            @id @default(uuid())
-  orderId            String
-  consumerUserId     String
-  supplierUserId     String
-  reasonCode         String
-  productCategory    String
-  lineItemIds        String[]
-  notes              String?
-  windowDeadline     DateTime
-  status             ReturnClaimStatus @default(draft)
-  feeAllocation      FeeAllocation     @default(none)
-  mediatorNotes      String?
-  resolutionType     ReturnResolution?
-  refundAmountPaise  Int?
-  refundReceiptRef   String?
-  refundReceivedAt   DateTime?
-  pickupScheduledAt  DateTime?
-  pickupWindow       String?
-  pickedUpAt         DateTime?
-  replacedAt         DateTime?
-  closedAt           DateTime?
-  submittedAt        DateTime?
-  decidedAt          DateTime?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  id                String            @id @default(uuid())
+  orderId           String
+  consumerUserId    String
+  supplierUserId    String
+  reasonCode        String
+  productCategory   String
+  lineItemIds       String[]
+  notes             String?
+  windowDeadline    DateTime
+  status            ReturnClaimStatus @default(draft)
+  feeAllocation     FeeAllocation     @default(none)
+  mediatorNotes     String?
+  resolutionType    ReturnResolution?
+  refundAmountPaise Int?
+  refundReceiptRef  String?
+  refundReceivedAt  DateTime?
+  pickupScheduledAt DateTime?
+  pickupWindow      String?
+  pickedUpAt        DateTime?
+  replacedAt        DateTime?
+  closedAt          DateTime?
+  submittedAt       DateTime?
+  decidedAt         DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
-  order      Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order      Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
   evidence   ReturnEvidence[]
   chatThread ChatThread?
 
@@ -563,16 +565,16 @@ model ReturnClaim {
 }
 
 model ReturnEvidence {
-  id           String   @id @default(uuid())
-  claimId      String
+  id          String   @id @default(uuid())
+  claimId     String
   /// Order line this photo belongs to (so suppliers can match photo → product).
-  lineItemId   String?
-  storageRef   String
-  mediaType    String
-  batchNumber  String?
-  expiryDate   String?
-  defectNote   String?
-  createdAt    DateTime @default(now())
+  lineItemId  String?
+  storageRef  String
+  mediaType   String
+  batchNumber String?
+  expiryDate  String?
+  defectNote  String?
+  createdAt   DateTime @default(now())
 
   claim ReturnClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
 
@@ -580,17 +582,17 @@ model ReturnEvidence {
 }
 
 model ShelfLifeMatrix {
-  id                String @id @default(uuid())
-  productCategory   String @unique
-  subCategory       String?
+  id                 String  @id @default(uuid())
+  productCategory    String  @unique
+  subCategory        String?
   totalShelfLifeDays Int
-  minRslDays        Int
-  notes             String?
+  minRslDays         Int
+  notes              String?
 }
 
 model ReturnWindowMatrix {
-  id              String @id @default(uuid())
-  productCategory String @unique
+  id              String   @id @default(uuid())
+  productCategory String   @unique
   windowHours     Float
   validReasons    String[]
   exampleItems    String?
@@ -606,43 +608,43 @@ model SupportCategory {
 }
 
 model SupportArticle {
-  id         String           @id @default(uuid())
-  slug       String           @unique
+  id         String          @id @default(uuid())
+  slug       String          @unique
   title      String
   bodyMd     String
   audience   SupportAudience
   categoryId String?
-  sortOrder  Int              @default(0)
-  published  Boolean          @default(true)
-  updatedAt  DateTime         @updatedAt
-  createdAt  DateTime         @default(now())
+  sortOrder  Int             @default(0)
+  published  Boolean         @default(true)
+  updatedAt  DateTime        @updatedAt
+  createdAt  DateTime        @default(now())
 
   category SupportCategory? @relation(fields: [categoryId], references: [id])
 }
 
 model SupportTicket {
-  id         String              @id @default(uuid())
-  userId     String
-  role       UserRole
-  category   String
-  subject    String
-  status     SupportTicketStatus @default(open)
-  orderId    String?
-  createdAt  DateTime            @default(now())
-  updatedAt  DateTime            @updatedAt
+  id        String              @id @default(uuid())
+  userId    String
+  role      UserRole
+  category  String
+  subject   String
+  status    SupportTicketStatus @default(open)
+  orderId   String?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
 
   user     User             @relation(fields: [userId], references: [id])
   messages SupportMessage[]
 }
 
 model SupportMessage {
-  id         String   @id @default(uuid())
-  ticketId   String
-  senderId   String
-  body       String
+  id            String   @id @default(uuid())
+  ticketId      String
+  senderId      String
+  body          String
   attachmentRef String?
-  isOps      Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  isOps         Boolean  @default(false)
+  createdAt     DateTime @default(now())
 
   ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   sender User          @relation(fields: [senderId], references: [id])
@@ -700,15 +702,15 @@ model UserPreference {
 }
 
 model AuctionConfig {
-  id                     String @id @default("default")
-  baseWindowSec          Int    @default(600)
-  autoExtendTriggerSec   Int    @default(60)
-  autoExtendBySec        Int    @default(120)
-  maxExtends             Int    @default(5)
-  minDecrementPaise      Int    @default(10000)
-  weightPrice            Float  @default(0.45)
-  weightRsl              Float  @default(0.2)
-  weightDistance         Float  @default(0.15)
-  weightOnTime           Float  @default(0.15)
-  weightRating           Float  @default(0.05)
+  id                   String @id @default("default")
+  baseWindowSec        Int    @default(600)
+  autoExtendTriggerSec Int    @default(60)
+  autoExtendBySec      Int    @default(120)
+  maxExtends           Int    @default(5)
+  minDecrementPaise    Int    @default(10000)
+  weightPrice          Float  @default(0.45)
+  weightRsl            Float  @default(0.2)
+  weightDistance       Float  @default(0.15)
+  weightOnTime         Float  @default(0.15)
+  weightRating         Float  @default(0.05)
 }

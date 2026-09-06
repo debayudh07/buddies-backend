@@ -48,10 +48,13 @@ export function deliverySlaDeadline(
   return new Date(from.getTime() + deliverySlaHours(durationHours) * 3600 * 1000);
 }
 
-export function withDeliverySla<T extends { durationHours?: number | null }>(
-  row: T,
-): T & { deliverySlaHours: number } {
-  return { ...row, deliverySlaHours: deliverySlaHours(row.durationHours) };
+export function withDeliverySla<
+  T extends { durationHours?: number | null; slaHours?: number | null },
+>(row: T): T & { deliverySlaHours: number } {
+  return {
+    ...row,
+    deliverySlaHours: row.slaHours ?? deliverySlaHours(row.durationHours),
+  };
 }
 
 /** "Expected delivery" hour choices a consumer may pick. */

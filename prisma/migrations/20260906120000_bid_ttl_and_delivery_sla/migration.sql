@@ -3,7 +3,7 @@ ALTER TABLE "BidRequest" ADD COLUMN "slaHours" INTEGER;
 
 -- Backfill slaHours from the stored delivery deadline where we have one.
 UPDATE "BidRequest"
-SET "slaHours" = GREATEST(1, ROUND(EXTRACT(EPOCH FROM ("preferredDeliverBy" - "createdAt")) / 3600))
+SET "slaHours" = GREATEST(1, ROUND(EXTRACT(EPOCH FROM ("preferredDeliverBy" - "createdAt")) / 3600.0)::int)
 WHERE "preferredDeliverBy" IS NOT NULL;
 
 -- Remap legacy bidding TTLs onto the new allowed set {0, 6, 12, 24}.
