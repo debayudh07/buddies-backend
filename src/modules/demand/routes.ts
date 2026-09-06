@@ -27,7 +27,6 @@ import { assertPaymentBacklog } from '../../lib/payment-backlog';
 import {
   ALLOWED_DURATION_HOURS,
   allowedSlaHoursFor,
-  assertWithinDeliverySla,
   isAllowedSlaHours,
   withDeliverySla,
 } from '../../lib/delivery-sla';
@@ -160,18 +159,19 @@ const itemSchema = catalogItemSchema;
 const patchSchema = z
   .object({
     deliveryWindow: z.string().min(1).optional(),
-    preferredDeliverBy: z.coerce.date().optional(),
+    /** New expected-delivery cap, in hours from creation. Replaces preferredDeliverBy. */
+    slaHours: z.number().int().optional(),
     addressId: z.string().uuid().optional(),
     items: z.array(itemSchema).min(1).optional(),
   })
   .refine(
     (b) =>
       b.deliveryWindow != null ||
-      b.preferredDeliverBy != null ||
+      b.slaHours != null ||
       b.addressId != null ||
       b.items != null,
     {
-      message: 'Provide deliveryWindow, addressId, and/or items',
+      message: 'Provide deliveryWindow, slaHours, addressId, and/or items',
     },
   );
 
@@ -574,6 +574,20 @@ demandRouter.patch(
         [address.line, address.city].filter(Boolean).join(', ') || deliveryAddress;
     }
 
+    let preferredDeliverBy: Date | undefined;
+    if (body.slaHours != null) {
+      if (!isAllowedSlaHours(body.slaHours, bidRequest.durationHours)) {
+        throw new AppError(
+          400,
+          'DELIVERY_OUTSIDE_SLA',
+          `slaHours must be one of ${allowedSlaHoursFor(bidRequest.durationHours).join(', ')} for this request's bid live time`,
+        );
+      }
+      preferredDeliverBy = new Date(
+        bidRequest.createdAt.getTime() + body.slaHours * 3600 * 1000,
+      );
+    }
+
     const updated = await prisma.$transaction(async (tx) => {
       if (canonicalItems) {
         await tx.bidRequestItem.deleteMany({ where: { bidRequestId: id } });
@@ -585,22 +599,11 @@ demandRouter.patch(
         });
       }
 
-      if (body.preferredDeliverBy) {
-        assertWithinDeliverySla({
-          at: body.preferredDeliverBy,
-          createdAt: bidRequest.createdAt,
-          durationHours: bidRequest.durationHours,
-          label: 'Preferred delivery time',
-        });
-      }
-
       return tx.bidRequest.update({
         where: { id },
         data: {
           ...(body.deliveryWindow != null ? { deliveryWindow: body.deliveryWindow } : {}),
-          ...(body.preferredDeliverBy != null
-            ? { preferredDeliverBy: body.preferredDeliverBy }
-            : {}),
+          ...(preferredDeliverBy != null ? { preferredDeliverBy } : {}),
           ...(body.addressId
             ? {
                 deliveryAddress,
