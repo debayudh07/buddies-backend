@@ -111,13 +111,28 @@ supportRouter.post(
     }),
   ),
   async (req, res) => {
+    const orderId = req.body.orderId as string | undefined;
+    if (orderId) {
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        select: { consumerUserId: true, supplierUserId: true },
+      });
+      if (
+        !order ||
+        (order.consumerUserId !== req.user!.id &&
+          order.supplierUserId !== req.user!.id)
+      ) {
+        throw new AppError(400, 'INVALID_ORDER', 'That order is not on your account');
+      }
+    }
+
     const ticket = await prisma.supportTicket.create({
       data: {
         userId: req.user!.id,
         role: req.user!.role,
         category: req.body.category,
         subject: req.body.subject,
-        orderId: req.body.orderId,
+        orderId,
         messages: {
           create: {
             senderId: req.user!.id,
