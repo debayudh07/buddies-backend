@@ -107,7 +107,14 @@ export async function presentUser<T extends UserWithProfiles | null>(user: T) {
     supplierProfile: supplier,
     consumerProfile: consumer,
     avatarUrl,
-    kycStatus: supplier?.kycStatus ?? consumer?.kycStatus ?? null,
+    // Match the account's active role so a consumer who also has a supplier
+    // profile (or vice versa) doesn't see the other profile's KYC status.
+    kycStatus:
+      user.role === 'supplier'
+        ? (supplier?.kycStatus ?? null)
+        : user.role === 'consumer'
+          ? (consumer?.kycStatus ?? null)
+          : (supplier?.kycStatus ?? consumer?.kycStatus ?? null),
     rating,
     ratingCount,
     onTimeRate,
