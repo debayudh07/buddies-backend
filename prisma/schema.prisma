@@ -392,11 +392,31 @@ model Order {
   returnClaims    ReturnClaim[]
   statusEvents    OrderStatusEvent[]
   ratings         OrderRating[]
+  handoffs        OrderHandoff[]
 
   @@index([bidRequestId])
   @@index([consumerUserId, createdAt])
   @@index([supplierUserId, createdAt])
   @@index([status])
+}
+
+/// Delivery handoff link. A shop mints one per order to let a delivery boy
+/// finish post-Preparing steps (map, arrived, payment, close) without a shop
+/// login. Token is scoped to that one order and expires with the order.
+model OrderHandoff {
+  id              String    @id @default(uuid())
+  orderId         String
+  supplierUserId  String
+  tokenHash       String    @unique
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  lastUsedAt      DateTime?
+  createdAt       DateTime  @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([supplierUserId, createdAt])
 }
 
 model OrderStatusEvent {

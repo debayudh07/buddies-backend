@@ -15,6 +15,12 @@ export type AuthUser = {
   id: string;
   role: UserRole;
   supabaseId?: string | null;
+  /**
+   * When present, the caller is authenticated by an order-scoped delivery
+   * handoff token. Every write on this request MUST target this order id,
+   * and general list / other-order routes MUST 403 in the route.
+   */
+  handoffOrderId?: string;
 };
 
 declare global {
@@ -31,6 +37,54 @@ declare global {
 function tokenAuthCacheKey(token: string): string {
   const h = createHash('sha256').update(token).digest('hex').slice(0, 40);
   return `tok:${h}`;
+}
+
+/**
+ * Delivery handoff bearer: `handoff:<token>` (raw token, hashed server-side).
+ * Grants access as the shop for exactly one order — the route layer must
+ * enforce that `req.params.id === req.user.handoffOrderId`.
+ */
+async function resolveHandoffAuth(header: string): Promise<AuthUser | null> {
+  const token = header.replace(/^Bearer\s+/i, '').trim();
+  if (!token.startsWith('handoff:')) return null;
+  const raw = token.slice('handoff:'.length);
+  if (!raw) return null;
+  const tokenHash = createHash('sha256').update(raw).digest('hex');
+  const row = await prisma.orderHandoff.findUnique({
+    where: { tokenHash },
+    select: {
+      id: true,
+      orderId: true,
+      supplierUserId: true,
+      expiresAt: true,
+      revokedAt: true,
+    },
+  });
+  if (!row) return null;
+  if (row.revokedAt) return null;
+  if (row.expiresAt.getTime() <= Date.now()) return null;
+
+  // Bounce if the order has already been closed / rejected.
+  const order = await prisma.order.findUnique({
+    where: { id: row.orderId },
+    select: { status: true },
+  });
+  if (!order) return null;
+  if (order.status === 'closed' || order.status === 'rejected_on_spot') {
+    return null;
+  }
+
+  // Fire-and-forget last-used timestamp — do not block the request.
+  void prisma.orderHandoff
+    .update({ where: { id: row.id }, data: { lastUsedAt: new Date() } })
+    .catch(() => undefined);
+
+  return {
+    id: row.supplierUserId,
+    role: 'supplier',
+    supabaseId: null,
+    handoffOrderId: row.orderId,
+  };
 }
 
 async function resolveDevAuth(header: string): Promise<AuthUser | null> {
@@ -183,6 +237,31 @@ async function syncContactFields(
   }
 }
 
+/**
+ * Which `<METHOD> <path-suffix>` combinations a delivery handoff token is
+ * allowed to hit. Path suffix is matched against `req.path` (which is relative
+ * to the mounted router — `/v1` is stripped) using placeholder `:id` for the
+ * order id. Every other route MUST 403 when the caller is a handoff.
+ */
+const HANDOFF_ALLOWED: Array<{ method: string; pattern: RegExp }> = [
+  { method: 'GET', pattern: /^\/handoff\/me$/ },
+  { method: 'GET', pattern: /^\/orders\/[^/]+$/ },
+  { method: 'POST', pattern: /^\/orders\/[^/]+\/status$/ },
+  { method: 'GET', pattern: /^\/orders\/[^/]+\/tracking\/live$/ },
+  { method: 'POST', pattern: /^\/orders\/[^/]+\/tracking$/ },
+  { method: 'GET', pattern: /^\/orders\/[^/]+\/challan$/ },
+  { method: 'POST', pattern: /^\/orders\/[^/]+\/payment\/confirm$/ },
+  { method: 'POST', pattern: /^\/orders\/[^/]+\/payment\/dispute$/ },
+];
+
+function isHandoffAllowed(method: string, path: string): boolean {
+  // Strip an optional `/v1` prefix — routers may be mounted with or without it.
+  const normalized = path.replace(/^\/v\d+/, '') || '/';
+  return HANDOFF_ALLOWED.some(
+    (entry) => entry.method === method && entry.pattern.test(normalized),
+  );
+}
+
 export async function authenticate(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header) return next(new AppError(401, 'UNAUTHORIZED', 'Missing Authorization header'));
@@ -190,7 +269,10 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   const authStarted = Date.now();
   try {
     let auth: AuthUser | null = null;
-    if (config.devAuthBypass && header.includes('dev:')) {
+    if (header.includes('handoff:')) {
+      auth = await resolveHandoffAuth(header);
+    }
+    if (!auth && config.devAuthBypass && header.includes('dev:')) {
       auth = await resolveDevAuth(header);
     }
     if (!auth) {
@@ -201,6 +283,14 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     }
     req.authMs = Date.now() - authStarted;
     if (!auth) return next(new AppError(401, 'UNAUTHORIZED', 'Invalid token'));
+
+    // Global handoff allow-list — defense in depth on top of route guards.
+    if (auth.handoffOrderId && !isHandoffAllowed(req.method, req.path)) {
+      return next(
+        new AppError(403, 'FORBIDDEN', 'Delivery link cannot access this endpoint'),
+      );
+    }
+
     req.user = auth;
     next();
   } catch (e) {
@@ -211,7 +301,10 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
 
 export async function resolveAuthFromHeader(header: string): Promise<AuthUser | null> {
   let auth: AuthUser | null = null;
-  if (config.devAuthBypass && header.includes('dev:')) {
+  if (header.includes('handoff:')) {
+    auth = await resolveHandoffAuth(header);
+  }
+  if (!auth && config.devAuthBypass && header.includes('dev:')) {
     auth = await resolveDevAuth(header);
   }
   if (!auth) {
@@ -223,11 +316,42 @@ export async function resolveAuthFromHeader(header: string): Promise<AuthUser | 
   return auth;
 }
 
+/**
+ * 403 if this request is on a handoff token but does not target its scoped
+ * order id. Attach to any route that mutates or reveals order-scoped data.
+ */
+export function requireHandoffOrderMatch(paramName = 'id') {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const scope = req.user?.handoffOrderId;
+    if (!scope) return next();
+    const id = req.params?.[paramName];
+    if (!id || id !== scope) {
+      return next(
+        new AppError(403, 'FORBIDDEN', 'Delivery link is scoped to a different order'),
+      );
+    }
+    next();
+  };
+}
+
+/** 403 whenever the request is authenticated by a handoff token. */
+export function blockHandoff(_req: Request, _res: Response, next: NextFunction) {
+  if (_req.user?.handoffOrderId) {
+    return next(new AppError(403, 'FORBIDDEN', 'Delivery link cannot perform this action'));
+  }
+  next();
+}
+
 export function requireRole(...roles: UserRole[]) {
   return (req: Request, _res: Response, next: NextFunction) => {
     if (!req.user) return next(new AppError(401, 'UNAUTHORIZED', 'Not authenticated'));
     if (!roles.includes(req.user.role) && req.user.role !== 'admin') {
       return next(new AppError(403, 'FORBIDDEN', `Requires role: ${roles.join('|')}`));
+    }
+    // Handoff sessions are always resolved as `supplier`, but must never be
+    // treated as admin regardless of `roles`.
+    if (req.user.handoffOrderId && req.user.role !== 'supplier') {
+      return next(new AppError(403, 'FORBIDDEN', 'Delivery link cannot perform this action'));
     }
     next();
   };

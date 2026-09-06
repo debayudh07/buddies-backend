@@ -7,7 +7,7 @@ SET "slaHours" = GREATEST(1, ROUND(EXTRACT(EPOCH FROM ("preferredDeliverBy" - "c
 WHERE "preferredDeliverBy" IS NOT NULL;
 
 -- Remap legacy bidding TTLs onto the new allowed set {0, 6, 12, 24}.
--- New meaning: 0 -> 12h SLA, 6 -> 24h, 12 -> 36h, 24 -> 48h.
+-- New meaning: 0 -> 6h SLA, 6 -> 24h, 12 -> 36h, 24 -> 48h.
 UPDATE "BidRequest"
 SET "durationHours" = CASE "durationHours"
   WHEN 24 THEN 12

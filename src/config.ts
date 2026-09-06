@@ -65,4 +65,15 @@ export const config = {
   firebaseServiceAccountPath:
     process.env.FIREBASE_SERVICE_ACCOUNT_PATH ??
     './secrets/firebase-service-account.json',
+  handoff: {
+    /** Order-scoped delivery link default lifetime (ms). */
+    defaultTtlMs: Number(process.env.HANDOFF_TTL_MS ?? 48 * 60 * 60 * 1000),
+    /** Custom app scheme URL prefix (deep link). */
+    appScheme: process.env.HANDOFF_APP_SCHEME ?? 'com.buddies.buddies-supplier://handoff',
+    /**
+     * HTTPS landing that tries to open the app and falls back to the store.
+     * Set HANDOFF_WEB_BASE to your public host (e.g. https://buddies.app/d).
+     */
+    webBase: process.env.HANDOFF_WEB_BASE ?? '',
+  },
 };

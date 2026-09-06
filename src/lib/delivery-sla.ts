@@ -6,11 +6,11 @@ export type AllowedDurationHours = (typeof ALLOWED_DURATION_HOURS)[number];
 
 /**
  * Minimum expected-delivery window (hours from creation) for each bidding TTL:
- *   30 min → 12h · 6h → 24h · 12h → 36h · 24h → 48h
+ *   30 min → 6h · 6h → 24h · 12h → 36h · 24h → 48h
  * Legacy keys kept so old rows still resolve a sane deadline.
  */
 const SLA_BY_DURATION: Record<number, number> = {
-  0: 12,
+  0: 6,
   6: 24,
   12: 36,
   24: 48,
@@ -58,7 +58,7 @@ export function withDeliverySla<
 }
 
 /** "Expected delivery" hour choices a consumer may pick. */
-export const ALLOWED_SLA_HOURS = [12, 24, 36, 48] as const;
+export const ALLOWED_SLA_HOURS = [6, 12, 24, 36, 48] as const;
 export type AllowedSlaHours = (typeof ALLOWED_SLA_HOURS)[number];
 
 /**

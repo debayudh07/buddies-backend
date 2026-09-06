@@ -1,8 +1,14 @@
 import { Router } from 'express';
+import { createHash, randomBytes } from 'crypto';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
-import { authenticate, requireRole } from '../../middleware/auth';
+import {
+  authenticate,
+  blockHandoff,
+  requireHandoffOrderMatch,
+  requireRole,
+} from '../../middleware/auth';
 import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
@@ -463,7 +469,7 @@ async function siblingOrdersFor(
   });
 }
 
-ordersRouter.get('/consumer/orders', authenticate, requireRole('consumer'), async (req, res) => {
+ordersRouter.get('/consumer/orders', authenticate, blockHandoff, requireRole('consumer'), async (req, res) => {
   const take = parseLimit(req.query.limit, { defaultLimit: 20, max: 50 });
   const cacheKey = `orders:consumer:${req.user!.id}:${take}`;
   const cached = await cacheGet<{ orders: unknown }>(cacheKey);
@@ -484,7 +490,7 @@ ordersRouter.get('/consumer/orders', authenticate, requireRole('consumer'), asyn
   res.json(payload);
 });
 
-ordersRouter.get('/supplier/orders', authenticate, requireRole('supplier'), async (req, res) => {
+ordersRouter.get('/supplier/orders', authenticate, blockHandoff, requireRole('supplier'), async (req, res) => {
   const take = parseLimit(req.query.limit, { defaultLimit: 20, max: 50 });
   const cacheKey = `orders:supplier:${req.user!.id}:${take}`;
   const cached = await cacheGet<{ orders: unknown }>(cacheKey);
@@ -505,7 +511,7 @@ ordersRouter.get('/supplier/orders', authenticate, requireRole('supplier'), asyn
   res.json(payload);
 });
 
-ordersRouter.get('/orders/:id', authenticate, async (req, res) => {
+ordersRouter.get('/orders/:id', authenticate, requireHandoffOrderMatch(), async (req, res) => {
   const id = requireParam(req, 'id');
   const cacheKey = `order:detail:${id}:${req.user!.id}`;
   const cached = await cacheGet<Record<string, unknown>>(cacheKey);
@@ -614,12 +620,22 @@ const statusSchema = z.object({
 ordersRouter.post(
   '/orders/:id/status',
   authenticate,
+  requireHandoffOrderMatch(),
   requireRole('supplier'),
   validateBody(statusSchema),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
     const next = req.body.status as OrderStatus;
     const currentStatus = order.status as OrderStatus;
+
+    // Handoff (delivery boy) can only run post-Preparing steps.
+    if (req.user!.handoffOrderId && next === 'preparing') {
+      throw new AppError(
+        403,
+        'FORBIDDEN',
+        'Delivery link cannot start preparing — the shop still does that',
+      );
+    }
 
     if (statusAlreadyApplied(currentStatus, next)) {
       const fresh = await getOrderForUser(order.id, req.user!.id, 'supplier');
@@ -710,6 +726,7 @@ ordersRouter.post(
 ordersRouter.post(
   '/orders/:id/tracking',
   authenticate,
+  requireHandoffOrderMatch(),
   requireRole('supplier'),
   validateBody(
     z.object({
@@ -758,7 +775,7 @@ ordersRouter.post(
   },
 );
 
-ordersRouter.get('/orders/:id/tracking/live', authenticate, async (req, res) => {
+ordersRouter.get('/orders/:id/tracking/live', authenticate, requireHandoffOrderMatch(), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, req.user!.role);
 
   const cached = await redisGet(`tracking:last:${order.id}`);
@@ -835,6 +852,7 @@ ordersRouter.post('/orders/:id/inspection/start', authenticate, requireRole('con
 ordersRouter.post(
   '/orders/:id/inspection/adjust-qty',
   authenticate,
+  blockHandoff,
   requireRole('supplier'),
   validateBody(z.object({ lineSnapshotJson: z.array(z.record(z.any())) })),
   async (req, res) => {
@@ -1029,7 +1047,7 @@ ordersRouter.post(
   },
 );
 
-ordersRouter.get('/orders/:id/challan', authenticate, async (req, res) => {
+ordersRouter.get('/orders/:id/challan', authenticate, requireHandoffOrderMatch(), async (req, res) => {
   const orderId = requireParam(req, 'id');
   const cacheKey = `order:challan:${orderId}:${req.user!.id}`;
   const cached = await cacheGet<Record<string, unknown>>(cacheKey);
@@ -1194,7 +1212,7 @@ async function loadInvoiceBundle(orderId: string, userId: string, role: string) 
   };
 }
 
-ordersRouter.get('/orders/:id/invoice', authenticate, async (req, res) => {
+ordersRouter.get('/orders/:id/invoice', authenticate, blockHandoff, async (req, res) => {
   const bundle = await loadInvoiceBundle(
     requireParam(req, 'id'),
     req.user!.id,
@@ -1203,7 +1221,7 @@ ordersRouter.get('/orders/:id/invoice', authenticate, async (req, res) => {
   res.json({ invoice: bundle.invoice });
 });
 
-ordersRouter.get('/orders/:id/invoice/download', authenticate, async (req, res) => {
+ordersRouter.get('/orders/:id/invoice/download', authenticate, blockHandoff, async (req, res) => {
   const bundle = await loadInvoiceBundle(
     requireParam(req, 'id'),
     req.user!.id,
@@ -1367,7 +1385,7 @@ ordersRouter.post(
   },
 );
 
-ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supplier'), async (req, res) => {
+ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireHandoffOrderMatch(), requireRole('supplier'), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
   const existingPay = await prisma.offlinePayment.findUnique({ where: { orderId: order.id } });
 
@@ -1442,7 +1460,7 @@ ordersRouter.post('/orders/:id/payment/confirm', authenticate, requireRole('supp
   res.json({ payment, order: updated, invoice });
 });
 
-ordersRouter.post('/orders/:id/payment/dispute', authenticate, requireRole('supplier'), async (req, res) => {
+ordersRouter.post('/orders/:id/payment/dispute', authenticate, requireHandoffOrderMatch(), requireRole('supplier'), async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
   if (!['delivered', 'challan_signed'].includes(order.status)) {
     throw new AppError(400, 'NOT_READY', 'Dispute only after delivery/challan');
@@ -1488,7 +1506,7 @@ const ratingBodySchema = z.object({
   comment: z.string().max(500).optional(),
 });
 
-ordersRouter.get('/orders/:id/ratings', authenticate, async (req, res) => {
+ordersRouter.get('/orders/:id/ratings', authenticate, blockHandoff, async (req, res) => {
   const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, req.user!.role);
   const ratings = await prisma.orderRating.findMany({
     where: { orderId: order.id },
@@ -1515,6 +1533,7 @@ ordersRouter.get('/orders/:id/ratings', authenticate, async (req, res) => {
 ordersRouter.post(
   '/orders/:id/ratings',
   authenticate,
+  blockHandoff,
   validateBody(ratingBodySchema),
   async (req, res) => {
     const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, req.user!.role);
@@ -1618,3 +1637,148 @@ ordersRouter.post(
     res.status(201).json({ rating: presentRating(rating) });
   },
 );
+
+// ---------------------------------------------------------------------------
+// Delivery handoff link (share to a delivery boy who doesn't need to log in)
+// ---------------------------------------------------------------------------
+
+/** Statuses at which a shop is allowed to mint a fresh handoff link. */
+const HANDOFF_MINT_STATUSES = new Set<OrderStatus>([
+  'preparing',
+  'out_for_delivery',
+  'arrived',
+  'inspection_pending',
+  'delivered',
+  'challan_signed',
+]);
+
+function buildHandoffLinks(token: string, orderId: string) {
+  // Include `o=<orderId>` so the shop's phone (already logged in) can jump
+  // straight to the order sheet without minting a handoff for itself. The
+  // delivery boy's runner resolves the order id from the token via
+  // `GET /handoff/me`, so this param is purely a hint for the shop.
+  const q = `t=${encodeURIComponent(token)}&o=${encodeURIComponent(orderId)}`;
+  const app = `${config.handoff.appScheme}?${q}`;
+  const web = config.handoff.webBase
+    ? `${config.handoff.webBase.replace(/\/$/, '')}/${encodeURIComponent(token)}?o=${encodeURIComponent(orderId)}`
+    : null;
+  return { app, web, share: web ?? app };
+}
+
+function presentHandoff(row: {
+  id: string;
+  orderId: string;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  lastUsedAt: Date | null;
+  createdAt: Date;
+}) {
+  return {
+    id: row.id,
+    orderId: row.orderId,
+    expiresAt: row.expiresAt,
+    revokedAt: row.revokedAt,
+    lastUsedAt: row.lastUsedAt,
+    createdAt: row.createdAt,
+    active: !row.revokedAt && row.expiresAt.getTime() > Date.now(),
+  };
+}
+
+/** Mint (or rotate) a delivery link for one order. Shop only. */
+ordersRouter.post(
+  '/orders/:id/handoff',
+  authenticate,
+  blockHandoff,
+  requireRole('supplier'),
+  async (req, res) => {
+    const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
+    if (order.supplierUserId !== req.user!.id) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your order');
+    }
+    if (!HANDOFF_MINT_STATUSES.has(order.status as OrderStatus)) {
+      throw new AppError(
+        400,
+        'INVALID_STATE',
+        'Send to delivery only after you start preparing this order',
+      );
+    }
+
+    // Rotate: revoke any active token first.
+    await prisma.orderHandoff.updateMany({
+      where: { orderId: order.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    const rawToken = randomBytes(24).toString('base64url');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + config.handoff.defaultTtlMs);
+
+    const row = await prisma.orderHandoff.create({
+      data: {
+        orderId: order.id,
+        supplierUserId: req.user!.id,
+        tokenHash,
+        expiresAt,
+      },
+    });
+
+    res.status(201).json({
+      handoff: presentHandoff(row),
+      // Raw token returned exactly once so the shop can share it.
+      token: rawToken,
+      links: buildHandoffLinks(rawToken, order.id),
+    });
+  },
+);
+
+/** Revoke the current delivery link (safe to call when none exists). */
+ordersRouter.delete(
+  '/orders/:id/handoff',
+  authenticate,
+  blockHandoff,
+  requireRole('supplier'),
+  async (req, res) => {
+    const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
+    if (order.supplierUserId !== req.user!.id) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your order');
+    }
+    const now = new Date();
+    const result = await prisma.orderHandoff.updateMany({
+      where: { orderId: order.id, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    res.json({ revoked: result.count, at: now });
+  },
+);
+
+/** Metadata about the currently active handoff (does not return the token). */
+ordersRouter.get(
+  '/orders/:id/handoff',
+  authenticate,
+  blockHandoff,
+  requireRole('supplier'),
+  async (req, res) => {
+    const order = await assertOrderAccess(requireParam(req, 'id'), req.user!.id, 'supplier');
+    if (order.supplierUserId !== req.user!.id) {
+      throw new AppError(403, 'FORBIDDEN', 'Not your order');
+    }
+    const row = await prisma.orderHandoff.findFirst({
+      where: { orderId: order.id, revokedAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ handoff: row ? presentHandoff(row) : null });
+  },
+);
+
+/**
+ * Delivery-boy endpoint — resolves the handoff bearer to the order id it is
+ * scoped to. This is the only way the runner UI learns which order to open,
+ * since the raw token itself hides the order id.
+ */
+ordersRouter.get('/handoff/me', authenticate, async (req, res) => {
+  const orderId = req.user?.handoffOrderId;
+  if (!orderId) {
+    throw new AppError(403, 'FORBIDDEN', 'This endpoint requires a delivery link');
+  }
+  res.json({ orderId });
+});

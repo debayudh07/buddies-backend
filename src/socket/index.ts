@@ -35,8 +35,14 @@ export function initSocket(httpServer: HttpServer): Server {
       if (!user) {
         return next(new Error('UNAUTHORIZED'));
       }
-      (socket.data as { userId: string; role: string }).userId = user.id;
-      (socket.data as { userId: string; role: string }).role = user.role;
+      const data = socket.data as {
+        userId: string;
+        role: string;
+        handoffOrderId?: string;
+      };
+      data.userId = user.id;
+      data.role = user.role;
+      if (user.handoffOrderId) data.handoffOrderId = user.handoffOrderId;
       next();
     } catch (e) {
       logger.warn('socket', 'auth failed', {
@@ -47,11 +53,16 @@ export function initSocket(httpServer: HttpServer): Server {
   });
 
   io.on('connection', (socket) => {
-    const userId = (socket.data as { userId?: string }).userId;
+    const data = socket.data as {
+      userId?: string;
+      handoffOrderId?: string;
+    };
+    const userId = data.userId;
+    const handoffOrderId = data.handoffOrderId;
 
     socket.on('join', (room: string) => {
       if (typeof room !== 'string' || room.length >= 200) return;
-      if (!canJoinRoom(userId, room)) {
+      if (!canJoinRoom(userId, room, handoffOrderId)) {
         socket.emit('error', { code: 'ROOM_FORBIDDEN', room });
         return;
       }
@@ -65,8 +76,18 @@ export function initSocket(httpServer: HttpServer): Server {
   return io;
 }
 
-function canJoinRoom(userId: string | undefined, room: string): boolean {
+function canJoinRoom(
+  userId: string | undefined,
+  room: string,
+  handoffOrderId?: string,
+): boolean {
   if (!userId) return false;
+
+  // Delivery handoff: allowed room is exactly one — tracking for that order.
+  if (handoffOrderId) {
+    return room === `tracking:${handoffOrderId}`;
+  }
+
   // user:{id} — self only
   if (room.startsWith('user:')) {
     return room === `user:${userId}`;
