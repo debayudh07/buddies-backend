@@ -11,12 +11,7 @@ let io: Server | null = null;
  * Handshake still requires JWT if a legacy client connects.
  */
 export function initSocket(httpServer: HttpServer): Server {
-  const origin =
-    config.allowedOrigins.length > 0
-      ? config.allowedOrigins
-      : config.isProd
-        ? false
-        : '*';
+  const origin = '*';
 
   io = new Server(httpServer, {
     cors: { origin, methods: ['GET', 'POST'] },

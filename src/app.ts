@@ -26,13 +26,8 @@ import { getRedisStatus, redisPing } from './lib/redis';
 import { config } from './config';
 
 function corsOrigin(): cors.CorsOptions['origin'] {
-  if (config.allowedOrigins.length > 0) {
-    return config.allowedOrigins;
-  }
-  if (config.isProd) {
-    // Fail closed if misconfigured — set ALLOWED_ORIGINS in production.
-    return false;
-  }
+  // Reflect any origin. `cors` echoes the request Origin (not `*`), so this stays
+  // compatible with `credentials: true`.
   return true;
 }
 
