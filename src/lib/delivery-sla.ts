@@ -1,7 +1,7 @@
 import { AppError } from './errors';
 
 /** Auction durationHours values the consumer may pick. */
-export const ALLOWED_DURATION_HOURS = [0, 24, 48, 72, 168] as const;
+export const ALLOWED_DURATION_HOURS = [0, 24, 48] as const;
 export type AllowedDurationHours = (typeof ALLOWED_DURATION_HOURS)[number];
 
 /** Delivery cap (hours) keyed by auction durationHours. Instant (0) → 12h. */

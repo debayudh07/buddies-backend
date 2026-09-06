@@ -921,16 +921,10 @@ ordersRouter.post(
       );
     }
 
-    const bidForPromise = await prisma.bid.findUnique({
-      where: { id: order.bidId },
-      select: { promisedDeliveryAt: true },
-    });
-    const promisedDeliveryAt = bidForPromise?.promisedDeliveryAt ?? null;
-    // A supplier's own stated promise takes precedence over the request's generic SLA cap;
-    // fall back to the SLA deadline when no promise was made.
-    const onTimeCutoff = promisedDeliveryAt ?? order.slaDeadlineAt;
-    const onTime = !onTimeCutoff || new Date() <= onTimeCutoff;
-    const brokenPromise = !!promisedDeliveryAt && !onTime;
+    // The request's SLA deadline is the actual, enforceable delivery limit.
+    // A supplier's own promisedDeliveryAt is informational only (communicated to the
+    // consumer), not a metric — it never factors into on-time/penalty logic.
+    const onTime = !order.slaDeadlineAt || new Date() <= order.slaDeadlineAt;
     const draftChallan = await prisma.digitalChallan.findUnique({ where: { orderId: order.id } });
 
     const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
@@ -971,7 +965,7 @@ ordersRouter.post(
       return { order: o, challan };
     });
 
-    await updateSupplierPerformanceOnDelivery(order.supplierUserId, onTime, { brokenPromise });
+    await updateSupplierPerformanceOnDelivery(order.supplierUserId, onTime);
     notifyOrderUpdated(
       {
         id: order.id,

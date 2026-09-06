@@ -185,16 +185,10 @@ export function emitOrderChatCreated(order: {
   });
 }
 
-export async function updateSupplierPerformanceOnDelivery(
-  supplierUserId: string,
-  onTime: boolean,
-  opts?: { brokenPromise?: boolean },
-) {
+export async function updateSupplierPerformanceOnDelivery(supplierUserId: string, onTime: boolean) {
   const profile = await prisma.supplierProfile.findUnique({ where: { userId: supplierUserId } });
   if (!profile) return;
-  // A supplier who stated their own delivery promise and missed it takes a bigger
-  // hit than generic lateness against the request's broad SLA window.
-  const alpha = !onTime && opts?.brokenPromise ? 0.35 : 0.2;
+  const alpha = 0.2;
   const sample = onTime ? 100 : 0;
   const onTimeRate = profile.onTimeRate * (1 - alpha) + sample * alpha;
   await prisma.supplierProfile.update({
