@@ -369,6 +369,7 @@ adminRouter.get('/admin/bid-requests', ...adminOnly, async (req, res) => {
       batchCode: r.batchCode,
       status: r.status,
       durationHours: r.durationHours,
+      slaHours: r.slaHours,
       deliveryWindow: r.deliveryWindow,
       preferredDeliverBy: r.preferredDeliverBy,
       liveEndsAt: r.liveEndsAt,

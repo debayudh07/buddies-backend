@@ -248,7 +248,10 @@ model BidRequest {
   consumerId      String
   status          BidRequestStatus @default(open)
   budgetPaise     Int?
-  durationHours   Int              @default(24)
+  /// Bidding time-to-live in hours (0 = Instant / 30 min).
+  durationHours   Int              @default(0)
+  /// Consumer's chosen expected-delivery window in hours from creation.
+  slaHours        Int?
   deliveryWindow  String?
   /// End of the consumer's preferred delivery clock window.
   preferredDeliverBy DateTime?

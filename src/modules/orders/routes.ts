@@ -172,6 +172,7 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
             deliveryWindow: true,
             preferredDeliverBy: true,
             durationHours: true,
+            slaHours: true,
             deliveryAddress: true,
             budgetPaise: true,
             consumer: {
@@ -348,6 +349,7 @@ function presentOrder<T extends {
     deliveryWindow?: string | null;
     preferredDeliverBy?: Date | string | null;
     durationHours?: number | null;
+    slaHours?: number | null;
     deliveryAddress?: string | null;
     items?: Array<{
       id?: string;
@@ -399,7 +401,9 @@ function presentOrder<T extends {
     deliveryWindow: order.bidRequest?.deliveryWindow ?? null,
     preferredDeliverBy: order.bidRequest?.preferredDeliverBy ?? null,
     promisedDeliveryAt: order.bid?.promisedDeliveryAt ?? null,
-    deliverySlaHours: deliverySlaHours(order.bidRequest?.durationHours),
+    deliverySlaHours:
+      order.bidRequest?.slaHours ??
+      deliverySlaHours(order.bidRequest?.durationHours),
     hasDeliveryPin,
     bidRequestId: order.bidRequestId ?? order.bidRequest?.id ?? null,
     batchCode: order.bidRequest?.batchCode ?? null,

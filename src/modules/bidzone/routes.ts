@@ -251,6 +251,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
             lng: true,
             createdAt: true,
             durationHours: true,
+            slaHours: true,
             deliveryWindow: true,
             preferredDeliverBy: true,
             items: {
@@ -298,7 +299,8 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       extendCount: r.extendCount,
       createdAt: r.createdAt,
       durationHours: r.durationHours,
-      deliverySlaHours: deliverySlaHours(r.durationHours),
+      slaHours: r.slaHours,
+      deliverySlaHours: r.slaHours ?? deliverySlaHours(r.durationHours),
       deliveryWindow: r.deliveryWindow,
       preferredDeliverBy: r.preferredDeliverBy,
       items: r.items,
@@ -866,7 +868,9 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       rslDaysAtDelivery: b.rslDaysAtDelivery,
       notes: b.notes,
       promisedDeliveryAt: b.promisedDeliveryAt,
-      deliverySlaHours: deliverySlaHours(b.bidRequest.durationHours),
+      slaHours: b.bidRequest.slaHours,
+      deliverySlaHours:
+        b.bidRequest.slaHours ?? deliverySlaHours(b.bidRequest.durationHours),
       preferredDeliverBy: b.bidRequest.preferredDeliverBy,
       status: stillLive ? b.status : b.status === 'active' ? 'expired' : b.status,
       statusHint,

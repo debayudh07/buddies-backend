@@ -1,13 +1,19 @@
 import { AppError } from './errors';
 
-/** Auction durationHours values the consumer may pick. */
-export const ALLOWED_DURATION_HOURS = [0, 24, 48] as const;
+/** Bidding time-to-live (hours) the consumer may pick. 0 = Instant (30 min). */
+export const ALLOWED_DURATION_HOURS = [0, 6, 12, 24] as const;
 export type AllowedDurationHours = (typeof ALLOWED_DURATION_HOURS)[number];
 
-/** Delivery cap (hours) keyed by auction durationHours. Instant (0) → 12h. */
+/**
+ * Minimum expected-delivery window (hours from creation) for each bidding TTL:
+ *   30 min → 12h · 6h → 24h · 12h → 36h · 24h → 48h
+ * Legacy keys kept so old rows still resolve a sane deadline.
+ */
 const SLA_BY_DURATION: Record<number, number> = {
   0: 12,
-  24: 36,
+  6: 24,
+  12: 36,
+  24: 48,
   48: 72,
   72: 168,
   168: 242,
@@ -22,12 +28,17 @@ export function isAllowedDurationHours(
   );
 }
 
-/** Hours the order may stay open after award. Instant → 12. */
+/** Minimum / fallback delivery window in hours for a bidding TTL. */
 export function deliverySlaHours(
   durationHours: number | null | undefined,
 ): number {
-  const h = durationHours ?? 24;
-  return SLA_BY_DURATION[h] ?? 36;
+  const h = durationHours ?? 0;
+  return SLA_BY_DURATION[h] ?? 48;
+}
+
+/** The mapped minimum expected-delivery hours the consumer may pick for a TTL. */
+export function minSlaHoursFor(durationHours: number | null | undefined): number {
+  return deliverySlaHours(durationHours);
 }
 
 export function deliverySlaDeadline(
@@ -43,14 +54,17 @@ export function withDeliverySla<T extends { durationHours?: number | null }>(
   return { ...row, deliverySlaHours: deliverySlaHours(row.durationHours) };
 }
 
-/** "Expected delivery" hour choices a consumer may pick, keyed by bid live time (durationHours). */
-export const ALLOWED_SLA_HOURS = [12, 24, 48] as const;
+/** "Expected delivery" hour choices a consumer may pick. */
+export const ALLOWED_SLA_HOURS = [12, 24, 36, 48] as const;
 export type AllowedSlaHours = (typeof ALLOWED_SLA_HOURS)[number];
 
-/** SLA-hour options available for a given bid live time — must be able to deliver after bidding closes. */
+/**
+ * Expected-delivery options for a bidding TTL: the mapped minimum and anything
+ * longer (a consumer can always allow more time, never less than the mapping).
+ */
 export function allowedSlaHoursFor(durationHours: number | null | undefined): number[] {
-  const d = durationHours ?? 0;
-  return ALLOWED_SLA_HOURS.filter((h) => h >= d);
+  const min = minSlaHoursFor(durationHours);
+  return ALLOWED_SLA_HOURS.filter((h) => h >= min);
 }
 
 export function isAllowedSlaHours(

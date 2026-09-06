@@ -27,6 +27,7 @@ import { assertPaymentBacklog } from '../../lib/payment-backlog';
 import {
   ALLOWED_DURATION_HOURS,
   allowedSlaHoursFor,
+  deliverySlaHours,
   isAllowedSlaHours,
   withDeliverySla,
 } from '../../lib/delivery-sla';
@@ -119,7 +120,7 @@ const createSchema = z
       .refine((h) => (ALLOWED_DURATION_HOURS as readonly number[]).includes(h), {
         message: `durationHours must be one of ${ALLOWED_DURATION_HOURS.join(', ')}`,
       })
-      .default(24),
+      .default(0),
     /** Expected delivery cap, in hours from creation — the actual enforceable delivery limit. */
     slaHours: z.number().int(),
     deliveryWindow: z.string().optional(),
@@ -143,11 +144,15 @@ const createSchema = z
 
 /** Resolve auction window seconds from stored durationHours (0 = Instant 30 min). */
 function auctionWindowSec(durationHours: number | null | undefined): number {
-  const h = durationHours ?? 24;
-  // Instant is a fixed short window — never raise it to AUCTION_BASE_WINDOW_SEC
-  // (often 24h in env), which would force "Instant" to last a full day.
+  const h = durationHours ?? 0;
+  // Instant is a fixed short window.
   if (h === 0) {
     return 30 * 60;
+  }
+  // An explicit allowed TTL (6/12/24h) is honoured exactly — the env base window
+  // is only a floor for legacy/unknown values.
+  if ((ALLOWED_DURATION_HOURS as readonly number[]).includes(h)) {
+    return h * 3600;
   }
   const desiredSec = h * 3600;
   return Math.min(
@@ -277,6 +282,7 @@ demandRouter.post(
         consumerId: consumer.id,
         budgetPaise: body.budgetPaise,
         durationHours: body.durationHours,
+        slaHours: body.slaHours,
         deliveryWindow: body.deliveryWindow,
         preferredDeliverBy,
         deliveryAddress,
@@ -360,6 +366,7 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
       batchCode: true,
       status: true,
       durationHours: true,
+      slaHours: true,
       budgetPaise: true,
       liveEndsAt: true,
       createdAt: true,
@@ -626,6 +633,7 @@ demandRouter.patch(
         where: { id },
         data: {
           ...(body.deliveryWindow != null ? { deliveryWindow: body.deliveryWindow } : {}),
+          ...(body.slaHours != null ? { slaHours: body.slaHours } : {}),
           ...(preferredDeliverBy != null ? { preferredDeliverBy } : {}),
           ...(body.addressId
             ? {
@@ -764,15 +772,24 @@ demandRouter.post(
       throw new AppError(403, 'FORBIDDEN', 'Not your bid request');
     }
 
+    const createdAt = new Date();
     const durationSec = auctionWindowSec(original.durationHours);
-    const liveEndsAt = new Date(Date.now() + durationSec * 1000);
+    const liveEndsAt = new Date(createdAt.getTime() + durationSec * 1000);
+    // Carry the expected-delivery window; re-anchor its deadline to the new clock.
+    const slaHours =
+      original.slaHours ?? deliverySlaHours(original.durationHours);
+    const preferredDeliverBy = new Date(
+      createdAt.getTime() + slaHours * 3600 * 1000,
+    );
     const bidRequest = await prisma.bidRequest.create({
       data: {
         batchCode: batchCode(),
         consumerId: original.consumerId,
         budgetPaise: original.budgetPaise,
         durationHours: original.durationHours,
+        slaHours,
         deliveryWindow: original.deliveryWindow,
+        preferredDeliverBy,
         privacyAccepted: true,
         liveEndsAt,
         minDecrementPaise: original.minDecrementPaise,
