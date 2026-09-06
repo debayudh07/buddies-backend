@@ -26,8 +26,9 @@ import { invalidateBidzoneFeeds, invalidateConsumerLists, invalidateDemandDetail
 import { assertPaymentBacklog } from '../../lib/payment-backlog';
 import {
   ALLOWED_DURATION_HOURS,
+  allowedSlaHoursFor,
   assertWithinDeliverySla,
-  parseIsoDate,
+  isAllowedSlaHours,
   withDeliverySla,
 } from '../../lib/delivery-sla';
 
@@ -109,24 +110,35 @@ function itemCreateData(i: CanonicalLine) {
   };
 }
 
-const createSchema = z.object({
-  budgetPaise: z.number().int().positive().optional(),
-  /** Auction length in hours. Use `0` for Instant (30 minutes). */
-  durationHours: z
-    .number()
-    .int()
-    .refine((h) => (ALLOWED_DURATION_HOURS as readonly number[]).includes(h), {
-      message: `durationHours must be one of ${ALLOWED_DURATION_HOURS.join(', ')}`,
-    })
-    .default(24),
-  deliveryWindow: z.string().optional(),
-  preferredDeliverBy: z.coerce.date().optional(),
-  privacyAccepted: z.boolean(),
-  addressId: z.string().optional(),
-  lat: z.number().optional(),
-  lng: z.number().optional(),
-  items: z.array(catalogItemSchema).min(1),
-});
+const createSchema = z
+  .object({
+    budgetPaise: z.number().int().positive().optional(),
+    /** Auction length in hours. Use `0` for Instant (30 minutes). */
+    durationHours: z
+      .number()
+      .int()
+      .refine((h) => (ALLOWED_DURATION_HOURS as readonly number[]).includes(h), {
+        message: `durationHours must be one of ${ALLOWED_DURATION_HOURS.join(', ')}`,
+      })
+      .default(24),
+    /** Expected delivery cap, in hours from creation — the actual enforceable delivery limit. */
+    slaHours: z.number().int(),
+    deliveryWindow: z.string().optional(),
+    privacyAccepted: z.boolean(),
+    addressId: z.string().optional(),
+    lat: z.number().optional(),
+    lng: z.number().optional(),
+    items: z.array(catalogItemSchema).min(1),
+  })
+  .superRefine((body, ctx) => {
+    if (!isAllowedSlaHours(body.slaHours, body.durationHours)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['slaHours'],
+        message: `slaHours must be one of ${allowedSlaHoursFor(body.durationHours).join(', ')} for the selected bid live time`,
+      });
+    }
+  });
 
 /** Resolve auction window seconds from stored durationHours (0 = Instant 30 min). */
 function auctionWindowSec(durationHours: number | null | undefined): number {
@@ -230,17 +242,9 @@ demandRouter.post(
     const canonicalItems = canonicalizeItems(body.items as IncomingCatalogLine[]);
 
     const createdAt = new Date();
-    const preferredDeliverBy = body.preferredDeliverBy
-      ? parseIsoDate(body.preferredDeliverBy) ?? body.preferredDeliverBy
-      : null;
-    if (preferredDeliverBy) {
-      assertWithinDeliverySla({
-        at: preferredDeliverBy,
-        createdAt,
-        durationHours: body.durationHours,
-        label: 'Preferred delivery time',
-      });
-    }
+    // The consumer's chosen slaHours (validated above against the bid live time) is the
+    // actual, enforceable delivery limit — computed here, not taken as a raw client date.
+    const preferredDeliverBy = new Date(createdAt.getTime() + body.slaHours * 3600 * 1000);
 
     // Prefer consumer-selected duration; Instant (durationHours=0) = 30 minutes.
     const durationSec = auctionWindowSec(body.durationHours);

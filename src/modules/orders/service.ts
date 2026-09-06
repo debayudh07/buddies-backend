@@ -50,9 +50,13 @@ async function insertOrderFromBid(
   });
   if (existing) return existing;
 
-  const slaDeadlineAt = new Date(
-    Date.now() + deliverySlaHours(bid.bidRequest.durationHours) * 3600 * 1000,
-  );
+  // The consumer's own preferredDeliverBy (set once, at request creation) is the actual,
+  // enforceable delivery limit — anchor the order to it rather than restarting a generic
+  // SLA clock at acceptance time. Fall back to the old duration-derived cap only for legacy
+  // requests created before that field was required.
+  const slaDeadlineAt =
+    bid.bidRequest.preferredDeliverBy ??
+    new Date(Date.now() + deliverySlaHours(bid.bidRequest.durationHours) * 3600 * 1000);
   const consumer = bid.bidRequest.consumer;
   const coveredItems = bid.bidRequest.items.filter((i) => coveredItemIds.includes(i.id));
 

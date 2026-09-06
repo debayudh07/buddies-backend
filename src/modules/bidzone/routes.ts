@@ -18,6 +18,7 @@ import { quantityInUnit, type CatalogUnit } from '../../lib/product-catalog';
 import { publicSupplierLabel } from '../../lib/user-present';
 import { cacheGet, cacheSet, invalidateBidzoneFeeds, invalidateSupplierLists, invalidateConsumerLists, invalidateDemandDetail } from '../../lib/response-cache';
 import {
+  assertWithinCap,
   assertWithinDeliverySla,
   deliverySlaHours,
   parseIsoDate,
@@ -378,13 +379,25 @@ bidzoneRouter.post(
       ? parseIsoDate(body.promisedDeliveryAt) ?? body.promisedDeliveryAt
       : null;
     if (promisedDeliveryAt) {
-      assertWithinDeliverySla({
-        at: promisedDeliveryAt,
-        createdAt: bidRequest.createdAt,
-        durationHours: bidRequest.durationHours,
-        label: 'Your delivery time',
-        after: new Date(),
-      });
+      // The request's own preferredDeliverBy (set by the consumer at creation) is the actual,
+      // enforceable delivery limit. Fall back to the old duration-derived cap only for legacy
+      // requests created before that field was required.
+      if (bidRequest.preferredDeliverBy) {
+        assertWithinCap({
+          at: promisedDeliveryAt,
+          cap: bidRequest.preferredDeliverBy,
+          label: 'Your delivery time',
+          after: new Date(),
+        });
+      } else {
+        assertWithinDeliverySla({
+          at: promisedDeliveryAt,
+          createdAt: bidRequest.createdAt,
+          durationHours: bidRequest.durationHours,
+          label: 'Your delivery time',
+          after: new Date(),
+        });
+      }
     }
 
     if (!body.grade || body.rslDaysAtDelivery < 0) {

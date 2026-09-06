@@ -43,6 +43,43 @@ export function withDeliverySla<T extends { durationHours?: number | null }>(
   return { ...row, deliverySlaHours: deliverySlaHours(row.durationHours) };
 }
 
+/** "Expected delivery" hour choices a consumer may pick, keyed by bid live time (durationHours). */
+export const ALLOWED_SLA_HOURS = [12, 24, 48] as const;
+export type AllowedSlaHours = (typeof ALLOWED_SLA_HOURS)[number];
+
+/** SLA-hour options available for a given bid live time — must be able to deliver after bidding closes. */
+export function allowedSlaHoursFor(durationHours: number | null | undefined): number[] {
+  const d = durationHours ?? 0;
+  return ALLOWED_SLA_HOURS.filter((h) => h >= d);
+}
+
+export function isAllowedSlaHours(
+  hours: number | null | undefined,
+  durationHours: number | null | undefined,
+): hours is number {
+  return typeof hours === 'number' && allowedSlaHoursFor(durationHours).includes(hours);
+}
+
+/** Validate a date against an explicit absolute cap (e.g. bidRequest.preferredDeliverBy), rather
+ * than recomputing one from durationHours. Use this once a concrete cap is already known. */
+export function assertWithinCap(opts: {
+  at: Date;
+  cap: Date;
+  label: string;
+  after?: Date;
+}): void {
+  if (opts.at.getTime() > opts.cap.getTime() + 1000) {
+    throw new AppError(
+      400,
+      'DELIVERY_OUTSIDE_SLA',
+      `${opts.label} must be by ${opts.cap.toISOString()}`,
+    );
+  }
+  if (opts.after && opts.at.getTime() < opts.after.getTime() - 1000) {
+    throw new AppError(400, 'DELIVERY_IN_PAST', `${opts.label} must be in the future`);
+  }
+}
+
 export function parseIsoDate(raw: unknown): Date | null {
   if (raw instanceof Date && !Number.isNaN(raw.getTime())) return raw;
   if (typeof raw !== 'string' || raw.trim() === '') return null;
