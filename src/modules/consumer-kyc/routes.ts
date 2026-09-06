@@ -104,6 +104,25 @@ consumerKycRouter.get('/admin/consumers', authenticate, requireRole('admin'), as
   res.json({ consumers: profiles });
 });
 
+consumerKycRouter.get(
+  '/admin/consumers/:userId',
+  authenticate,
+  requireRole('admin'),
+  async (req, res) => {
+    const userId = requireParam(req, 'userId');
+    const profile = await prisma.consumerProfile.findUnique({
+      where: { userId },
+      include: {
+        user: {
+          select: { id: true, displayName: true, phone: true, email: true, createdAt: true },
+        },
+      },
+    });
+    if (!profile) throw new AppError(404, 'NOT_FOUND', 'Restaurant profile not found');
+    res.json({ consumer: profile });
+  },
+);
+
 /** Admin / ops: verify consumer so they can send bid requests. */
 consumerKycRouter.post(
   '/admin/consumer/:userId/verify',
