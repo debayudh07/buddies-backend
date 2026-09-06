@@ -194,6 +194,8 @@ identityRouter.post(
 
 const consumerProfileSchema = z.object({
   restaurantName: z.string().min(1).optional(),
+  ownerName: z.string().min(1).optional(),
+  ownerPhone: z.string().trim().min(8).max(20).optional(),
   addressLine: z.string().optional(),
   city: z.string().optional(),
   lat: z.number().optional(),

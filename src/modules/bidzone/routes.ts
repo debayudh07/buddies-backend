@@ -358,8 +358,15 @@ bidzoneRouter.post(
     const profile = await requireVerifiedSupplier(req.user!.id);
 
     const quotaInfo = await getSupplierBidQuotaInfo(req.user!.id);
+    // A still-live earlier bid on THIS request is auto-withdrawn below when the
+    // new one is placed, so it must not count against the concurrent-bid cap —
+    // otherwise a supplier at the cap can never revise a bid that hasn't expired.
     const activeCount = await prisma.bid.count({
-      where: { supplierId: profile.id, ...activeUnexpiredWhere() },
+      where: {
+        supplierId: profile.id,
+        ...activeUnexpiredWhere(),
+        bidRequestId: { not: body.bidRequestId },
+      },
     });
     if (activeCount >= quotaInfo.cap) {
       throw new AppError(
@@ -712,7 +719,14 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
         include: {
           items: true,
           consumer: {
-            select: { restaurantName: true, city: true, lat: true, lng: true },
+            select: {
+              restaurantName: true,
+              ownerName: true,
+              city: true,
+              lat: true,
+              lng: true,
+              user: { select: { phone: true } },
+            },
           },
           bids: {
             where: {
@@ -760,6 +774,13 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
 
     const city = b.bidRequest.consumer.city?.trim() || null;
     const restaurant = b.bidRequest.consumer.restaurantName?.trim() || null;
+    const contactRevealed = b.status === 'accepted' || !!b.order;
+    const consumerContactName = contactRevealed
+      ? (b.bidRequest.consumer.ownerName?.trim() || restaurant)
+      : null;
+    const consumerContactPhone = contactRevealed
+      ? (b.bidRequest.consumer.user?.phone ?? null)
+      : null;
     const locationHint =
       b.status === 'accepted' || b.order
         ? [restaurant, city].filter(Boolean).join(', ') ||
@@ -852,6 +873,9 @@ bidzoneRouter.get('/supplier/bids', authenticate, requireRole('supplier'), async
       score: b.score,
       distanceKm,
       locationHint,
+      restaurantName: contactRevealed ? restaurant : null,
+      consumerContactName,
+      consumerContactPhone,
       consumerAckAt: b.consumerAckAt,
       supplierAckAt: b.supplierAckAt,
       acceptedAt: b.acceptedAt,
@@ -951,10 +975,13 @@ bidzoneRouter.get(
           select: {
             id: true,
             publicLabel: true,
+            businessName: true,
+            ownerName: true,
             rating: true,
             onTimeRate: true,
             returnRate: true,
             challanAdjustRate: true,
+            user: { select: { phone: true } },
           },
         },
         order: { select: { id: true, orderCode: true, status: true } },
@@ -1007,12 +1034,27 @@ bidzoneRouter.get(
     }
 
     const payload = {
-      bids: filteredBids.map((b) => ({
-        ...b,
-        supplier: b.supplier
-          ? { ...b.supplier, publicLabel: publicSupplierLabel(b.supplier) }
-          : b.supplier,
-      })),
+      bids: filteredBids.map((b) => {
+        // Contact details (owner name + phone) are only shared once the bid is
+        // accepted / an order exists, so the parties can coordinate delivery.
+        const revealed = b.status === 'accepted' || !!b.order;
+        const { user: supplierUser, ...supplierRest } = b.supplier ?? {
+          user: null as { phone: string | null } | null,
+        };
+        return {
+          ...b,
+          supplier: b.supplier
+            ? {
+                ...supplierRest,
+                publicLabel: publicSupplierLabel(b.supplier),
+                contactName: revealed
+                  ? (b.supplier.ownerName ?? b.supplier.businessName ?? null)
+                  : null,
+                contactPhone: revealed ? (supplierUser?.phone ?? null) : null,
+              }
+            : b.supplier,
+        };
+      }),
       bidTtlSec: config.auction.bidTtlSec,
     };
     await cacheSet(cacheKey, payload, 8_000);
@@ -1177,6 +1219,11 @@ const awardPlanSchema = z.object({
       }),
     )
     .min(1),
+  /**
+   * Partial finalize: award only the selected items and close the request,
+   * cancelling every remaining open item instead of requiring a winner for each.
+   */
+  dropUnselected: z.boolean().optional(),
 });
 
 /**
@@ -1189,7 +1236,7 @@ bidzoneRouter.post(
   validateBody(awardPlanSchema),
   async (req, res) => {
     const bidRequestId = requireParam(req, 'id');
-    const { selections } = req.body as z.infer<typeof awardPlanSchema>;
+    const { selections, dropUnselected } = req.body as z.infer<typeof awardPlanSchema>;
     const bidRequest = assertFound(
       await prisma.bidRequest.findUnique({
         where: { id: bidRequestId },
@@ -1213,13 +1260,23 @@ bidzoneRouter.post(
       throw new AppError(400, 'NOTHING_TO_AWARD', 'All items are already awarded');
     }
     const openIds = new Set(openItems.map((i) => i.id));
-    if (selectedItemIds.length !== openItems.length || selectedItemIds.some((id) => !openIds.has(id))) {
+    if (selectedItemIds.some((id) => !openIds.has(id))) {
+      throw new AppError(
+        400,
+        'INVALID_SELECTION',
+        'A selected item is not open for award on this request',
+      );
+    }
+    if (!dropUnselected && selectedItemIds.length !== openItems.length) {
       throw new AppError(
         400,
         'INCOMPLETE_SELECTION',
-        'Select exactly one winning bid for every remaining item',
+        'Select exactly one winning bid for every remaining item, or finalize with the items you have',
       );
     }
+    const unselectedOpenIds = openItems
+      .map((i) => i.id)
+      .filter((id) => !selectedItemIds.includes(id));
 
     const bidIds = [...new Set(selections.map((s) => s.bidId))];
     const bids = await prisma.bid.findMany({
@@ -1299,6 +1356,13 @@ bidzoneRouter.post(
         await tx.bidRequestItem.update({
           where: { id: sel.bidRequestItemId },
           data: { status: 'awarded', awardedBidId: sel.bidId },
+        });
+      }
+
+      if (dropUnselected && unselectedOpenIds.length > 0) {
+        await tx.bidRequestItem.updateMany({
+          where: { id: { in: unselectedOpenIds }, status: 'open' },
+          data: { status: 'cancelled' },
         });
       }
 

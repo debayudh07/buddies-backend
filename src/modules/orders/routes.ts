@@ -154,11 +154,13 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
                 id: true,
                 publicLabel: true,
                 businessName: true,
+                ownerName: true,
                 rating: true,
                 ratingCount: true,
                 onTimeRate: true,
                 returnRate: true,
                 challanAdjustRate: true,
+                user: { select: { phone: true } },
               },
             },
           },
@@ -172,6 +174,13 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
             durationHours: true,
             deliveryAddress: true,
             budgetPaise: true,
+            consumer: {
+              select: {
+                restaurantName: true,
+                ownerName: true,
+                user: { select: { phone: true } },
+              },
+            },
             items: {
               select: {
                 id: true,
@@ -232,14 +241,43 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
   }
   const supplier = order.bid?.supplier;
   const chatThread = order.chatThreads[0] ?? null;
+
+  // An order always implies an accepted bid, so both parties may see each other's
+  // owner name + phone to coordinate delivery. `counterparty` is the other side.
+  const consumerProfile = order.bidRequest?.consumer;
+  const supplierContact = {
+    name: supplier?.ownerName?.trim() || publicSupplierLabel(supplier) || null,
+    phone: supplier?.user?.phone ?? null,
+  };
+  const consumerContact = {
+    name:
+      consumerProfile?.ownerName?.trim() ||
+      consumerProfile?.restaurantName?.trim() ||
+      null,
+    phone: consumerProfile?.user?.phone ?? null,
+  };
+  const viewerIsSupplier = order.supplierUserId === userId;
+  const counterparty = viewerIsSupplier ? consumerContact : supplierContact;
+
+  const { consumer: _consumer, ...bidRequestRest } = order.bidRequest ?? {
+    consumer: null,
+  };
+
   return {
     ...order,
+    bidRequest: order.bidRequest ? bidRequestRest : order.bidRequest,
     chatThread,
+    supplierContact,
+    consumerContact,
+    counterparty,
     bid: order.bid
       ? {
           ...order.bid,
           supplier: supplier
-            ? { ...supplier, publicLabel: publicSupplierLabel(supplier) }
+            ? (() => {
+                const { user: _u, ...rest } = supplier;
+                return { ...rest, publicLabel: publicSupplierLabel(supplier) };
+              })()
             : supplier,
         }
       : order.bid,
