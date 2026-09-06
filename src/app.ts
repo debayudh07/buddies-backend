@@ -8,6 +8,7 @@ import { errorHandler } from './middleware/errorHandler';
 import { logger } from './lib/logger';
 import { identityRouter } from './modules/identity/routes';
 import { kycRouter } from './modules/supplier-kyc/routes';
+import { consumerKycRouter } from './modules/consumer-kyc/routes';
 import { subscriptionsRouter } from './modules/subscriptions/routes';
 import { demandRouter } from './modules/demand/routes';
 import { bidzoneRouter } from './modules/bidzone/routes';
@@ -19,6 +20,7 @@ import { uploadsRouter } from './modules/uploads/routes';
 import { notificationsRouter } from './modules/notifications/routes';
 import { dashboardRouter } from './modules/dashboard/routes';
 import { catalogRouter } from './modules/catalog/routes';
+import { adminRouter } from './modules/admin/routes';
 import { isFirebaseReady, initFirebase } from './lib/notify';
 import { getRedisStatus, redisPing } from './lib/redis';
 import { config } from './config';
@@ -97,6 +99,7 @@ export function createApp() {
   app.use('/v1', identityRouter);
   app.use('/v1', uploadsRouter);
   app.use('/v1', kycRouter);
+  app.use('/v1', consumerKycRouter);
   app.use('/v1', subscriptionsRouter);
   app.use('/v1', catalogRouter);
   app.use('/v1', demandRouter);
@@ -107,6 +110,7 @@ export function createApp() {
   app.use('/v1', supportRouter);
   app.use('/v1', notificationsRouter);
   app.use('/v1', dashboardRouter);
+  app.use('/v1', adminRouter);
 
   app.get('/openapi.yaml', (_req, res) => {
     res.sendFile(path.join(process.cwd(), 'openapi', 'openapi.yaml'));

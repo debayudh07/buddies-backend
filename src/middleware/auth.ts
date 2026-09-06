@@ -130,9 +130,8 @@ async function resolveSupabaseAuth(header: string): Promise<AuthUser | null> {
     user = await prisma.user.create({
       data: {
         supabaseId,
-        role: ['consumer', 'supplier', 'admin'].includes(metaRole)
-          ? metaRole
-          : 'consumer',
+        // Admin is granted only via a Prisma update — never from JWT metadata.
+        role: metaRole === 'supplier' ? 'supplier' : 'consumer',
         phone: claims.phone ?? undefined,
         email: claims.email ?? undefined,
         displayName:

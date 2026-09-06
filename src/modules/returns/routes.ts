@@ -210,6 +210,20 @@ returnsRouter.post(
       );
     }
 
+    // An item that already has an active or successfully-resolved claim can't be
+    // claimed again — only a fully rejected prior claim allows a retry.
+    const priorClaims = await prisma.returnClaim.findMany({
+      where: { orderId: order.id, lineItemIds: { hasSome: lineItemIds } },
+      select: { status: true },
+    });
+    if (priorClaims.some((c) => c.status !== 'rejected')) {
+      throw new AppError(
+        400,
+        'ALREADY_RETURNED',
+        'One or more of these items already has an active or completed return claim',
+      );
+    }
+
     const claim = await prisma.returnClaim.create({
       data: {
         orderId: order.id,

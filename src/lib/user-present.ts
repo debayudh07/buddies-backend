@@ -107,7 +107,7 @@ export async function presentUser<T extends UserWithProfiles | null>(user: T) {
     supplierProfile: supplier,
     consumerProfile: consumer,
     avatarUrl,
-    kycStatus: supplier?.kycStatus ?? null,
+    kycStatus: supplier?.kycStatus ?? consumer?.kycStatus ?? null,
     rating,
     ratingCount,
     onTimeRate,

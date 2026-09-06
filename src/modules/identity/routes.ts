@@ -40,12 +40,15 @@ identityRouter.post('/auth/session', authenticate, async (req, res) => {
 
   // Apply the app surface role (consumer app → consumer, supplier app → supplier).
   // Same Supabase account can be used on both apps; route access uses this role.
+  // Never overwrite an admin row — the web console must not get demoted.
   if (intended === 'consumer' || intended === 'supplier') {
     const current = await prisma.user.findUnique({
       where: { id: req.user!.id },
       select: { id: true, role: true, supabaseId: true },
     });
-    if (current && current.role !== intended) {
+    if (current?.role === 'admin') {
+      req.user!.role = 'admin';
+    } else if (current && current.role !== intended) {
       await prisma.user.update({
         where: { id: current.id },
         data: { role: intended },
@@ -265,7 +268,7 @@ async function getOrCreateConsumerProfile(userId: string) {
   const existing = await prisma.consumerProfile.findUnique({ where: { userId } });
   if (existing) return existing;
   return prisma.consumerProfile.create({
-    data: { userId, restaurantName: 'Restaurant' },
+    data: { userId },
   });
 }
 

@@ -127,6 +127,8 @@ const createSchema = z
     addressId: z.string().optional(),
     lat: z.number().optional(),
     lng: z.number().optional(),
+    /** Set when this request was created from the "Reorder" flow — for lineage only. */
+    reorderOfId: z.string().uuid().optional(),
     items: z.array(catalogItemSchema).min(1),
   })
   .superRefine((body, ctx) => {
@@ -215,8 +217,18 @@ demandRouter.post(
     let consumer = await prisma.consumerProfile.findUnique({ where: { userId: req.user!.id } });
     if (!consumer) {
       consumer = await prisma.consumerProfile.create({
-        data: { userId: req.user!.id, restaurantName: 'Restaurant' },
+        data: { userId: req.user!.id },
       });
+    }
+    if (!consumer.restaurantName?.trim()) {
+      throw new AppError(
+        400,
+        'RESTAURANT_NAME_REQUIRED',
+        'Add your restaurant/cafe name in your profile before sending bid requests',
+      );
+    }
+    if (consumer.kycStatus !== 'verified') {
+      throw new AppError(403, 'KYC_REQUIRED', 'Complete KYC verification before sending bid requests');
     }
 
     await prisma.user.update({
@@ -241,6 +253,16 @@ demandRouter.post(
 
     const canonicalItems = canonicalizeItems(body.items as IncomingCatalogLine[]);
 
+    if (body.reorderOfId) {
+      const original = await prisma.bidRequest.findUnique({
+        where: { id: body.reorderOfId },
+        select: { consumerId: true },
+      });
+      if (!original || original.consumerId !== consumer.id) {
+        throw new AppError(404, 'NOT_FOUND', 'Original bid request not found');
+      }
+    }
+
     const createdAt = new Date();
     // The consumer's chosen slaHours (validated above against the bid live time) is the
     // actual, enforceable delivery limit — computed here, not taken as a raw client date.
@@ -263,6 +285,7 @@ demandRouter.post(
         minDecrementPaise: config.auction.minDecrementPaise,
         lat: deliveryLat,
         lng: deliveryLng,
+        reorderOfId: body.reorderOfId,
         items: {
           create: canonicalItems.map(itemCreateData),
         },

@@ -7,6 +7,7 @@ import { validateBody } from '../../middleware/validate';
 import { AppError } from '../../lib/errors';
 import { canonicalizeSupplierCategories } from '../../lib/product-categories';
 import { invalidateSupplierLists } from '../../lib/response-cache';
+import { recordAdminAudit } from '../admin/audit';
 
 export const kycRouter = Router();
 
@@ -161,9 +162,15 @@ kycRouter.post(
   authenticate,
   requireRole('admin'),
   async (req, res) => {
+    const userId = requireParam(req, 'userId');
     const profile = await prisma.supplierProfile.update({
-      where: { userId: requireParam(req, 'userId') },
+      where: { userId },
       data: { kycStatus: 'verified' },
+    });
+    await recordAdminAudit({
+      actorId: req.user!.id,
+      action: 'kyc.verify',
+      target: `supplier:${userId}`,
     });
     res.json({ profile });
   },
@@ -174,9 +181,15 @@ kycRouter.post(
   authenticate,
   requireRole('admin'),
   async (req, res) => {
+    const userId = requireParam(req, 'userId');
     const profile = await prisma.supplierProfile.update({
-      where: { userId: requireParam(req, 'userId') },
+      where: { userId },
       data: { kycStatus: 'rejected' },
+    });
+    await recordAdminAudit({
+      actorId: req.user!.id,
+      action: 'kyc.reject',
+      target: `supplier:${userId}`,
     });
     res.json({ profile });
   },

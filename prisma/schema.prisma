@@ -145,21 +145,41 @@ model User {
   supportMessages SupportMessage[]
   notifications   Notification[]
   preference      UserPreference?
+  adminAudits     AdminAudit[]
+}
+
+model AdminAudit {
+  id        String   @id @default(uuid())
+  actorId   String
+  action    String
+  target    String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
 }
 
 model ConsumerProfile {
-  id             String   @id @default(uuid())
-  userId         String   @unique
+  id             String    @id @default(uuid())
+  userId         String    @unique
   restaurantName String?
+  ownerName      String?
+  ownerPhone     String?
+  publicLabel    String?
+  aadhaarRef     String?
   addressLine    String?
   city           String?
   lat            Float?
   lng            Float?
-  trustScore     Float    @default(100)
-  rating         Float    @default(5)
-  ratingCount    Int      @default(0)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  kycStatus      KycStatus @default(draft)
+  trustScore     Float     @default(100)
+  rating         Float     @default(5)
+  ratingCount    Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   bidRequests  BidRequest[]
