@@ -1652,16 +1652,30 @@ const HANDOFF_MINT_STATUSES = new Set<OrderStatus>([
   'challan_signed',
 ]);
 
-function buildHandoffLinks(token: string, orderId: string) {
+function buildHandoffLinks(
+  token: string,
+  orderId: string,
+  req: import('express').Request,
+) {
   // Include `o=<orderId>` so the shop's phone (already logged in) can jump
   // straight to the order sheet without minting a handoff for itself. The
   // delivery boy's runner resolves the order id from the token via
   // `GET /handoff/me`, so this param is purely a hint for the shop.
   const q = `t=${encodeURIComponent(token)}&o=${encodeURIComponent(orderId)}`;
   const app = `${config.handoff.appScheme}?${q}`;
-  const web = config.handoff.webBase
-    ? `${config.handoff.webBase.replace(/\/$/, '')}/${encodeURIComponent(token)}?o=${encodeURIComponent(orderId)}`
+
+  // Prefer HANDOFF_WEB_BASE (e.g. https://buddies.app/d) — otherwise derive
+  // an https base from the request host so the shared link is always a real,
+  // clickable URL that renders as a tappable link in WhatsApp / SMS.
+  const forwardedProto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
+  const proto = forwardedProto || req.protocol || 'https';
+  const host = req.get('host');
+  const derived = host ? `${proto}://${host}/d` : '';
+  const base = (config.handoff.webBase || derived).replace(/\/$/, '');
+  const web = base
+    ? `${base}/${encodeURIComponent(token)}?o=${encodeURIComponent(orderId)}`
     : null;
+
   return { app, web, share: web ?? app };
 }
 
@@ -1726,7 +1740,7 @@ ordersRouter.post(
       handoff: presentHandoff(row),
       // Raw token returned exactly once so the shop can share it.
       token: rawToken,
-      links: buildHandoffLinks(rawToken, order.id),
+      links: buildHandoffLinks(rawToken, order.id, req),
     });
   },
 );

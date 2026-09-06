@@ -21,6 +21,7 @@ import { notificationsRouter } from './modules/notifications/routes';
 import { dashboardRouter } from './modules/dashboard/routes';
 import { catalogRouter } from './modules/catalog/routes';
 import { adminRouter } from './modules/admin/routes';
+import { handoffLandingRouter } from './modules/orders/handoff-landing';
 import { isFirebaseReady, initFirebase } from './lib/notify';
 import { getRedisStatus, redisPing } from './lib/redis';
 import { config } from './config';
@@ -33,6 +34,9 @@ function corsOrigin(): cors.CorsOptions['origin'] {
 
 export function createApp() {
   const app = express();
+  // Behind a proxy (Render/Fly/Nginx). Needed so req.protocol + req.get('host')
+  // resolve to the public URL when building shareable handoff links.
+  app.set('trust proxy', true);
   app.use(helmet());
   app.use(
     cors({
@@ -106,6 +110,10 @@ export function createApp() {
   app.use('/v1', notificationsRouter);
   app.use('/v1', dashboardRouter);
   app.use('/v1', adminRouter);
+
+  // Short, shareable HTTPS landing for delivery links (WhatsApp/SMS linkify
+  // http/https only). Mounted at root so URLs stay short: `https://<host>/d/<t>`.
+  app.use('/', handoffLandingRouter);
 
   app.get('/openapi.yaml', (_req, res) => {
     res.sendFile(path.join(process.cwd(), 'openapi', 'openapi.yaml'));
