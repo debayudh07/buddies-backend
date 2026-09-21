@@ -21,6 +21,7 @@ import { notificationsRouter } from './modules/notifications/routes';
 import { dashboardRouter } from './modules/dashboard/routes';
 import { catalogRouter } from './modules/catalog/routes';
 import { adminRouter } from './modules/admin/routes';
+import { ledgerRouter } from './modules/ledger/routes';
 import { handoffLandingRouter } from './modules/orders/handoff-landing';
 import { isFirebaseReady, initFirebase } from './lib/notify';
 import { getRedisStatus, redisPing } from './lib/redis';
@@ -109,6 +110,7 @@ export function createApp() {
   app.use('/v1', supportRouter);
   app.use('/v1', notificationsRouter);
   app.use('/v1', dashboardRouter);
+  app.use('/v1', ledgerRouter);
   app.use('/v1', adminRouter);
 
   // Short, shareable HTTPS landing for delivery links (WhatsApp/SMS linkify
