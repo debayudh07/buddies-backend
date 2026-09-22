@@ -15,14 +15,19 @@ export type LedgerEntry = {
   partyId: string;
   partyLabel: string;
   particular: string;
+  /** Positive raises still-due; negative lowers it. */
+  signedPaise: number;
+  /** Kept for older clients; apps show signedPaise instead. */
   debitPaise: number;
   creditPaise: number;
+  /** Running still-due after this line (full history walk). */
   balancePaise: number;
 };
 
 export type LedgerParty = {
   id: string;
   label: string;
+  /** Closing due for the selected window. */
   duePaise: number;
   lastAt: string | null;
 };
@@ -36,8 +41,12 @@ export type LedgerOpenOrder = {
 };
 
 export type LedgerSummary = {
+  /** Still due just before `from`. */
+  openingDuePaise: number;
   billedPaise: number;
   settledPaise: number;
+  refundedPaise: number;
+  /** opening + billed − settled − refunded (same window). */
   duePaise: number;
   openCount: number;
 };
@@ -78,9 +87,7 @@ type RawLine = {
   particular: string;
   /** Positive amount that increases "still due" for this viewer. */
   dueDeltaPaise: number;
-  /** Amount shown in the debit column (viewer books). */
   debitPaise: number;
-  /** Amount shown in the credit column (viewer books). */
   creditPaise: number;
 };
 
@@ -128,6 +135,9 @@ function partyLabelFor(
 /**
  * Build a read-only account book for one user.
  * Positive balance = still due (supplier to collect / restaurant to pay).
+ *
+ * Identity for the selected window:
+ *   closingDue = openingDue + billed − collected − refunded
  */
 export async function buildLedger(opts: {
   userId: string;
@@ -155,8 +165,6 @@ export async function buildLedger(opts: {
           ...(counterpartyId ? { supplierUserId: counterpartyId } : {}),
         };
 
-  // Look back far enough that opening balance outside the window is correct.
-  // We fetch all matching orders for this viewer (capped) and filter lines by date.
   const orders = await prisma.order.findMany({
     where,
     orderBy: { createdAt: 'asc' },
@@ -233,13 +241,7 @@ export async function buildLedger(opts: {
     }
 
     if (DELIVERED_STATUSES.has(order.status) && amountPaise > 0) {
-      const at =
-        order.deliveredAt ??
-        // Fallback if deliveredAt was never stamped (older rows).
-        order.updatedAt ??
-        order.createdAt;
-      // Supplier books: delivery = credit (to collect).
-      // Restaurant books: delivery = debit (to pay).
+      const at = order.deliveredAt ?? order.updatedAt ?? order.createdAt;
       const debitPaise = role === 'consumer' ? amountPaise : 0;
       const creditPaise = role === 'supplier' ? amountPaise : 0;
       allLines.push({
@@ -261,7 +263,6 @@ export async function buildLedger(opts: {
     const pay = order.offlinePayment;
     if (pay?.status === 'confirmed_by_supplier' && amountPaise > 0) {
       const at = pay.confirmedAt ?? pay.updatedAt ?? order.updatedAt;
-      // Payment settles the receivable / payable.
       const debitPaise = role === 'supplier' ? amountPaise : 0;
       const creditPaise = role === 'consumer' ? amountPaise : 0;
       allLines.push({
@@ -342,89 +343,122 @@ export async function buildLedger(opts: {
     return a.orderCode.localeCompare(b.orderCode);
   });
 
-  // Walk full history so opening balance outside the window is correct.
+  // Full walk: opening is the balance just before `from`.
+  // Summary totals always count every kind in the window (kind filter only
+  // hides rows; it must not punch holes in the balance).
   let running = 0;
-  const windowed: LedgerEntry[] = [];
+  let openingDuePaise = 0;
   let billedPaise = 0;
   let settledPaise = 0;
+  let refundedPaise = 0;
+  const windowed: LedgerEntry[] = [];
+  const partyClosing = new Map<string, number>();
+  const partyMeta = new Map<string, { label: string; lastAt: Date | null }>();
+  let openingCaptured = false;
 
   for (const line of allLines) {
+    const before = running;
     running += line.dueDeltaPaise;
     const inWindow =
       line.at.getTime() >= from.getTime() && line.at.getTime() <= to.getTime();
-    if (!inWindow) continue;
 
-    if (line.kind === 'delivery') billedPaise += Math.abs(line.dueDeltaPaise);
-    if (line.kind === 'payment') settledPaise += Math.abs(line.dueDeltaPaise);
+    if (!openingCaptured && line.at.getTime() >= from.getTime()) {
+      openingDuePaise = before;
+      openingCaptured = true;
+    }
 
-    const kindOk =
-      kindFilter === 'all' ||
-      (kindFilter === 'delivery' && line.kind === 'delivery') ||
-      (kindFilter === 'payment' && line.kind === 'payment') ||
-      (kindFilter === 'return' &&
-        (line.kind === 'return' || line.kind === 'replacement'));
-    if (!kindOk) continue;
+    // Party closing due for the window: balance after the last in-window line,
+    // or opening if the party had no activity in the window.
+    if (inWindow) {
+      partyClosing.set(line.partyId, running);
+      const meta = partyMeta.get(line.partyId);
+      if (!meta || (meta.lastAt?.getTime() ?? 0) < line.at.getTime()) {
+        partyMeta.set(line.partyId, {
+          label: line.partyLabel,
+          lastAt: line.at,
+        });
+      }
 
-    windowed.push({
-      at: line.at.toISOString(),
-      kind: line.kind,
-      orderId: line.orderId,
-      orderCode: line.orderCode,
-      returnId: line.returnId,
-      invoiceNumber: line.invoiceNumber,
-      partyId: line.partyId,
-      partyLabel: line.partyLabel,
-      particular: line.particular,
-      debitPaise: line.debitPaise,
-      creditPaise: line.creditPaise,
-      balancePaise: running,
-    });
+      if (line.kind === 'delivery') billedPaise += Math.abs(line.dueDeltaPaise);
+      if (line.kind === 'payment') settledPaise += Math.abs(line.dueDeltaPaise);
+      if (line.kind === 'return') refundedPaise += Math.abs(line.dueDeltaPaise);
+
+      const kindOk =
+        kindFilter === 'all' ||
+        (kindFilter === 'delivery' && line.kind === 'delivery') ||
+        (kindFilter === 'payment' && line.kind === 'payment') ||
+        (kindFilter === 'return' &&
+          (line.kind === 'return' || line.kind === 'replacement'));
+
+      if (kindOk) {
+        windowed.push({
+          at: line.at.toISOString(),
+          kind: line.kind,
+          orderId: line.orderId,
+          orderCode: line.orderCode,
+          returnId: line.returnId,
+          invoiceNumber: line.invoiceNumber,
+          partyId: line.partyId,
+          partyLabel: line.partyLabel,
+          particular: line.particular,
+          signedPaise: line.dueDeltaPaise,
+          debitPaise: line.debitPaise,
+          creditPaise: line.creditPaise,
+          balancePaise: running,
+        });
+      }
+    } else if (line.at.getTime() < from.getTime()) {
+      // Seed party closing with pre-window balance so parties with no
+      // in-window activity still show their opening as closing.
+      partyClosing.set(line.partyId, running);
+      if (!partyMeta.has(line.partyId)) {
+        partyMeta.set(line.partyId, {
+          label: line.partyLabel,
+          lastAt: line.at,
+        });
+      }
+    }
   }
 
-  // Cap returned lines (keep the most recent within the window for the UI).
+  // No lines at all after `from` — opening is the final running balance.
+  if (!openingCaptured) {
+    openingDuePaise = running;
+  }
+
+  const closingDuePaise =
+    openingDuePaise + billedPaise - settledPaise - refundedPaise;
+
   const entries =
     windowed.length > ENTRY_CAP
       ? windowed.slice(windowed.length - ENTRY_CAP)
       : windowed;
 
-  // Parties: due across full history (not just window), so "Still to collect"
-  // matches the true open receivable per restaurant / supplier.
-  const partyRunning = new Map<string, number>();
-  const partyMeta = new Map<
-    string,
-    { label: string; lastAt: Date | null }
-  >();
-  for (const line of allLines) {
-    partyRunning.set(
-      line.partyId,
-      (partyRunning.get(line.partyId) ?? 0) + line.dueDeltaPaise,
-    );
-    const meta = partyMeta.get(line.partyId);
-    if (!meta || (meta.lastAt?.getTime() ?? 0) < line.at.getTime()) {
-      partyMeta.set(line.partyId, {
-        label: line.partyLabel,
-        lastAt: line.at,
-      });
-    }
-  }
-
-  const parties: LedgerParty[] = [...partyRunning.entries()]
+  const parties: LedgerParty[] = [...partyClosing.entries()]
     .map(([id, due]) => ({
       id,
       label: partyMeta.get(id)?.label ?? 'Party',
       duePaise: due,
       lastAt: partyMeta.get(id)?.lastAt?.toISOString() ?? null,
     }))
+    .filter((p) => p.duePaise !== 0 || (p.lastAt != null &&
+      // Keep parties that had activity in the window even if they closed to zero.
+      (() => {
+        try {
+          const t = Date.parse(p.lastAt!);
+          return t >= from.getTime() && t <= to.getTime();
+        } catch {
+          return false;
+        }
+      })()))
     .sort((a, b) => Math.abs(b.duePaise) - Math.abs(a.duePaise));
-
-  // Overall due = sum of party dues (full history).
-  const duePaise = [...partyRunning.values()].reduce((s, n) => s + n, 0);
 
   return {
     summary: {
+      openingDuePaise,
       billedPaise,
       settledPaise,
-      duePaise,
+      refundedPaise,
+      duePaise: closingDuePaise,
       openCount: open.length,
     },
     parties,

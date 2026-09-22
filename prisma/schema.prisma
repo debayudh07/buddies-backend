@@ -256,6 +256,8 @@ model BidRequest {
   /// End of the consumer's preferred delivery clock window.
   preferredDeliverBy DateTime?
   deliveryAddress    String?
+  /// Offline settlement modes the restaurant accepts: cash, upi (at least one).
+  paymentModes       String[]         @default(["cash", "upi"])
   privacyAccepted    Boolean          @default(false)
   liveEndsAt         DateTime
   extendCount        Int              @default(0)

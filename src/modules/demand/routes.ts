@@ -110,6 +110,16 @@ function itemCreateData(i: CanonicalLine) {
   };
 }
 
+const ALLOWED_PAYMENT_MODES = ['cash', 'upi'] as const;
+
+function normalizePaymentModes(raw: unknown): string[] {
+  const list = Array.isArray(raw)
+    ? raw.map((m) => String(m).trim().toLowerCase())
+    : [];
+  const uniq = [...new Set(list.filter((m) => (ALLOWED_PAYMENT_MODES as readonly string[]).includes(m)))];
+  return uniq;
+}
+
 const createSchema = z
   .object({
     budgetPaise: z.number().int().positive().optional(),
@@ -124,6 +134,11 @@ const createSchema = z
     /** Expected delivery cap, in hours from creation — the actual enforceable delivery limit. */
     slaHours: z.number().int(),
     deliveryWindow: z.string().optional(),
+    /** Offline settlement modes the restaurant accepts. At least one of cash | upi. */
+    paymentModes: z
+      .array(z.enum(['cash', 'upi']))
+      .min(1, 'Pick at least one payment mode')
+      .default(['cash', 'upi']),
     privacyAccepted: z.boolean(),
     addressId: z.string().optional(),
     lat: z.number().optional(),
@@ -286,6 +301,7 @@ demandRouter.post(
         deliveryWindow: body.deliveryWindow,
         preferredDeliverBy,
         deliveryAddress,
+        paymentModes: normalizePaymentModes(body.paymentModes),
         privacyAccepted: true,
         liveEndsAt,
         minDecrementPaise: config.auction.minDecrementPaise,
@@ -790,6 +806,10 @@ demandRouter.post(
         slaHours,
         deliveryWindow: original.deliveryWindow,
         preferredDeliverBy,
+        paymentModes:
+          original.paymentModes?.length > 0
+            ? original.paymentModes
+            : ['cash', 'upi'],
         privacyAccepted: true,
         liveEndsAt,
         minDecrementPaise: original.minDecrementPaise,
