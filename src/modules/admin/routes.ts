@@ -14,6 +14,7 @@ import {
 } from '../../lib/response-cache';
 import { recordAdminAudit } from './audit';
 import { subscriptionStatus } from '../subscriptions/service';
+import { sendPush } from '../../lib/notify';
 
 export const adminRouter = Router();
 
@@ -652,34 +653,50 @@ adminRouter.get('/admin/returns/:id', ...adminOnly, async (req, res) => {
   });
 });
 
+const ticketUserSelect = {
+  id: true,
+  role: true,
+  phone: true,
+  email: true,
+  displayName: true,
+  consumerProfile: { select: { restaurantName: true, city: true } },
+  supplierProfile: { select: { publicLabel: true, businessName: true } },
+} as const;
+
+function ticketPartyNames(user: {
+  consumerProfile: { restaurantName: string | null } | null;
+  supplierProfile: { publicLabel: string | null; businessName: string | null } | null;
+}) {
+  return {
+    restaurantName: user.consumerProfile?.restaurantName ?? null,
+    shopLabel: user.supplierProfile ? publicSupplierLabel(user.supplierProfile) : null,
+  };
+}
+
+/** Inbox: newest activity first, with the latest message as a preview. */
 adminRouter.get('/admin/support/tickets', ...adminOnly, async (req, res) => {
   const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-  const take = parseLimit(req.query.limit, { defaultLimit: 50, max: 150 });
+  const take = parseLimit(req.query.limit, { defaultLimit: 100, max: 200 });
   const tickets = await prisma.supportTicket.findMany({
     where: status ? { status: status as never } : undefined,
-    orderBy: { createdAt: 'desc' },
+    orderBy: { updatedAt: 'desc' },
     take,
     include: {
-      user: {
-        select: {
-          id: true,
-          role: true,
-          phone: true,
-          displayName: true,
-          consumerProfile: { select: { restaurantName: true } },
-          supplierProfile: { select: { publicLabel: true, businessName: true } },
-        },
+      user: { select: ticketUserSelect },
+      messages: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { body: true, isOps: true, createdAt: true },
       },
       _count: { select: { messages: true } },
     },
   });
   res.json({
-    tickets: tickets.map((t) => ({
+    tickets: tickets.map(({ messages, ...t }) => ({
       ...t,
-      restaurantName: t.user.consumerProfile?.restaurantName ?? null,
-      shopLabel: t.user.supplierProfile
-        ? publicSupplierLabel(t.user.supplierProfile)
-        : null,
+      ...ticketPartyNames(t.user),
+      lastMessage: messages[0] ?? null,
+      messageCount: t._count.messages,
     })),
   });
 });
@@ -690,11 +707,53 @@ adminRouter.get('/admin/support/tickets/:id', ...adminOnly, async (req, res) => 
     await prisma.supportTicket.findUnique({
       where: { id },
       include: {
-        user: { select: { id: true, role: true, phone: true, displayName: true } },
-        messages: { orderBy: { createdAt: 'asc' }, take: 80 },
+        user: { select: ticketUserSelect },
+        messages: {
+          orderBy: { createdAt: 'asc' },
+          take: 200,
+          include: { sender: { select: { id: true, displayName: true, role: true } } },
+        },
       },
     }),
   );
+  const order = ticket.orderId
+    ? await prisma.order.findUnique({
+        where: { id: ticket.orderId },
+        select: { id: true, orderCode: true, status: true },
+      })
+    : null;
+  res.json({ ticket: { ...ticket, ...ticketPartyNames(ticket.user), order } });
+});
+
+const TICKET_STATUSES = ['open', 'pending_user', 'pending_ops', 'resolved', 'closed'] as const;
+type TicketStatus = (typeof TICKET_STATUSES)[number];
+
+/** Admin sets a ticket status; the user gets a push when it is resolved or closed. */
+adminRouter.patch('/admin/support/tickets/:id', ...adminOnly, async (req, res) => {
+  const id = requireParam(req, 'id');
+  const status = (req.body as { status?: string } | undefined)?.status;
+  if (!status || !(TICKET_STATUSES as readonly string[]).includes(status)) {
+    throw new AppError(400, 'INVALID_STATUS', `status must be one of ${TICKET_STATUSES.join(', ')}`);
+  }
+  const before = assertFound(await prisma.supportTicket.findUnique({ where: { id } }));
+  const ticket = await prisma.supportTicket.update({
+    where: { id },
+    data: { status: status as TicketStatus },
+  });
+  await recordAdminAudit({
+    actorId: req.user!.id,
+    action: 'support.ticket_status',
+    target: `supportTicket:${id}`,
+    meta: { from: before.status, to: status },
+  });
+  if ((status === 'resolved' || status === 'closed') && before.status !== status) {
+    await sendPush({
+      userId: ticket.userId,
+      title: status === 'resolved' ? 'Support ticket resolved' : 'Support ticket closed',
+      body: ticket.subject.slice(0, 80),
+      data: { ticketId: ticket.id, type: 'support' },
+    });
+  }
   res.json({ ticket });
 });
 
