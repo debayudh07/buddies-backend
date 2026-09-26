@@ -8,6 +8,7 @@ import {
   getActiveSubscription,
   getConsumerBidSlots,
   getSupplierBidQuotaInfo,
+  subscribe,
   SUPPLIER_PREMIUM_BID_CAP,
 } from './service';
 
@@ -82,27 +83,15 @@ subscriptionsRouter.post(
       throw new AppError(400, 'INVALID_PLAN', 'Suppliers cannot use consumer_standard');
     }
 
-    await prisma.subscription.updateMany({
-      where: { userId: req.user!.id, active: true },
-      data: { active: false },
-    });
+    const { subscription, outcome } = await subscribe(req.user!.id, plan, introPrice ?? false);
 
-    const endsAt = new Date();
-    endsAt.setMonth(endsAt.getMonth() + 1);
-
-    const sub = await prisma.subscription.create({
-      data: {
-        userId: req.user!.id,
-        plan: plan as never,
-        active: true,
-        introPrice: introPrice ?? false,
-        endsAt,
-      },
-    });
-
-    res.status(201).json({
-      subscription: sub,
-      note: 'Goods payments remain offline; this is platform subscription only',
+    res.status(outcome === 'existing' ? 200 : 201).json({
+      subscription,
+      outcome,
+      note:
+        outcome === 'existing'
+          ? 'This plan is already active until endsAt; nothing was charged or changed'
+          : 'Goods payments remain offline; this is platform subscription only',
     });
   },
 );

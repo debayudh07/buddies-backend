@@ -13,6 +13,7 @@ import {
   invalidateDemandDetail,
 } from '../../lib/response-cache';
 import { recordAdminAudit } from './audit';
+import { subscriptionStatus } from '../subscriptions/service';
 
 export const adminRouter = Router();
 
@@ -744,14 +745,23 @@ adminRouter.get('/admin/subscriptions', ...adminOnly, async (req, res) => {
       },
     },
   });
+  const now = new Date();
   res.json({
-    subscriptions: rows.map((s) => ({
-      ...s,
-      restaurantName: s.user.consumerProfile?.restaurantName ?? null,
-      shopLabel: s.user.supplierProfile
-        ? publicSupplierLabel(s.user.supplierProfile)
-        : null,
-      status: s.active ? 'active' : 'ended',
-    })),
+    subscriptions: rows.map((s) => {
+      const status = subscriptionStatus(s, now);
+      return {
+        ...s,
+        active: status === 'active',
+        restaurantName: s.user.consumerProfile?.restaurantName ?? null,
+        shopLabel: s.user.supplierProfile
+          ? publicSupplierLabel(s.user.supplierProfile)
+          : null,
+        status,
+        daysLeft:
+          status === 'active' && s.endsAt
+            ? Math.max(0, Math.ceil((s.endsAt.getTime() - now.getTime()) / 86_400_000))
+            : null,
+      };
+    }),
   });
 });

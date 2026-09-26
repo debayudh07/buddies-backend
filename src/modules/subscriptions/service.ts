@@ -1,4 +1,99 @@
+import type { Subscription, SubscriptionPlan } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
+
+/**
+ * Subscriptions run for one calendar month from startsAt. The end day is
+ * clamped, so 31 Jan ends on 28/29 Feb rather than rolling into March.
+ */
+export function addOneMonth(from: Date): Date {
+  const d = new Date(from);
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + 1);
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, lastDay));
+  return d;
+}
+
+export type SubscriptionStatus = 'active' | 'expired' | 'replaced';
+
+/**
+ * - active: flagged active and still inside its month
+ * - replaced: switched off before its month ran out (plan change)
+ * - expired: ran its full month
+ */
+export function subscriptionStatus(
+  sub: Pick<Subscription, 'active' | 'startsAt' | 'endsAt'>,
+  now = new Date(),
+): SubscriptionStatus {
+  const end = sub.endsAt?.getTime();
+  if (sub.active && (end == null || end > now.getTime())) return 'active';
+  if (end != null && end > now.getTime()) return 'replaced';
+  if (end != null && end < addOneMonth(sub.startsAt).getTime() - 60_000) return 'replaced';
+  return 'expired';
+}
+
+export type SubscribeResult = {
+  subscription: Subscription;
+  /** 'created' = new month started; 'existing' = same plan already running; 'changed' = plan switched. */
+  outcome: 'created' | 'existing' | 'changed';
+};
+
+/**
+ * One live subscription per user. Re-subscribing to the running plan returns it
+ * unchanged (no duplicate, no reset). Switching plan ends the current one now
+ * and starts a fresh month on the new plan. A row lock on the user serialises
+ * concurrent taps so two requests cannot both create a month.
+ */
+export async function subscribe(
+  userId: string,
+  plan: SubscriptionPlan,
+  introPrice: boolean,
+): Promise<SubscribeResult> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`;
+
+    const now = new Date();
+    const live = await tx.subscription.findMany({
+      where: { userId, active: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    const current = live.find((s) => !s.endsAt || s.endsAt > now) ?? null;
+
+    // Tidy up: anything flagged active but past its end, plus stray extra actives.
+    const stale = live.filter((s) => s !== current);
+    for (const s of stale) {
+      const ranOut = s.endsAt && s.endsAt <= now;
+      await tx.subscription.update({
+        where: { id: s.id },
+        data: { active: false, ...(ranOut ? {} : { endsAt: now }) },
+      });
+    }
+
+    if (current && current.plan === plan) {
+      return { subscription: current, outcome: 'existing' as const };
+    }
+
+    if (current) {
+      await tx.subscription.update({
+        where: { id: current.id },
+        data: { active: false, endsAt: now },
+      });
+    }
+
+    const subscription = await tx.subscription.create({
+      data: {
+        userId,
+        plan,
+        active: true,
+        introPrice,
+        startsAt: now,
+        endsAt: addOneMonth(now),
+      },
+    });
+    return { subscription, outcome: current ? ('changed' as const) : ('created' as const) };
+  });
+}
 
 const CONSUMER_BID_SLOTS = 5;
 const SUPPLIER_BID_CAP = 5;
