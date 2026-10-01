@@ -77,6 +77,15 @@ export function createApp() {
     next();
   });
 
+  /**
+   * Liveness only — no DB, Redis or Firebase touched, so it stays cheap enough
+   * to poll every few minutes. Use this for the keep-alive ping and for
+   * platform health checks; use /health when you want dependency status.
+   */
+  app.get('/healthz', (_req, res) => {
+    res.status(200).type('text/plain').send('ok');
+  });
+
   app.get('/health', async (_req, res) => {
     if (config.fcmEnabled && !isFirebaseReady()) initFirebase();
     const redis = getRedisStatus();

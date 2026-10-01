@@ -115,6 +115,55 @@ export async function tickTrackingStale(): Promise<WorkerTickResult> {
   return { processed: notified };
 }
 
+/**
+ * True when now falls inside `config.keepAlive.activeHours` ("HH-HH", server
+ * local time). An empty setting means always. A window that wraps midnight
+ * (e.g. "22-6") is supported.
+ */
+export function isWithinKeepAliveWindow(window: string, now = new Date()): boolean {
+  const trimmed = window.trim();
+  if (!trimmed) return true;
+  const m = /^(\d{1,2})\s*-\s*(\d{1,2})$/.exec(trimmed);
+  if (!m) return true; // Unparseable window must not silently disable the ping.
+  const start = Number(m[1]);
+  const end = Number(m[2]);
+  if (start > 23 || end > 23) return true;
+  const hour = now.getHours();
+  return start <= end ? hour >= start && hour < end : hour >= start || hour < end;
+}
+
+/**
+ * Keep the instance warm by requesting our own public /healthz.
+ *
+ * Only prevents an idle spin-down; it cannot wake a process that is already
+ * stopped. Skipped silently when no public URL is known, so local dev and CI
+ * never emit outbound requests.
+ */
+export async function tickKeepAlive(): Promise<WorkerTickResult> {
+  const { url, activeHours } = config.keepAlive;
+  if (!url) return { processed: 0 };
+  if (!isWithinKeepAliveWindow(activeHours)) return { processed: 0 };
+
+  try {
+    const res = await fetch(`${url}/healthz`, {
+      method: 'GET',
+      headers: { 'user-agent': 'buddies-keepalive' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      logger.warn('worker', 'keepalive non-ok', { status: res.status });
+      return { processed: 0 };
+    }
+    return { processed: 1 };
+  } catch (e) {
+    // A failed ping is not actionable — log quietly and try again next tick.
+    logger.warn('worker', 'keepalive failed', {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return { processed: 0 };
+  }
+}
+
 /** In-process schedulers (BullMQ optional later when Redis queues are wired). */
 export function startWorkers() {
   setInterval(() => {
@@ -132,6 +181,28 @@ export function startWorkers() {
   setInterval(() => {
     void tickSubscriptionExpiry().catch((e) => console.error('[worker:subs]', e));
   }, 60_000);
+
+  const keepAlive = config.keepAlive;
+  if (keepAlive.enabled && keepAlive.url) {
+    // Fire once at boot so the warm window starts immediately after a deploy.
+    void tickKeepAlive().catch(() => undefined);
+    setInterval(
+      () => {
+        void tickKeepAlive().catch((e) => console.error('[worker:keepalive]', e));
+      },
+      Math.max(60, keepAlive.intervalSec) * 1000,
+    ).unref();
+    logger.info('boot', 'keepalive enabled', {
+      target: `${keepAlive.url}/healthz`,
+      everySec: keepAlive.intervalSec,
+      activeHours: keepAlive.activeHours || 'always',
+    });
+  } else if (keepAlive.enabled) {
+    logger.warn(
+      'boot',
+      'keepalive enabled but no URL — set KEEPALIVE_URL (or deploy where RENDER_EXTERNAL_URL exists)',
+    );
+  }
 
   console.log('[workers] auction, SLA, tracking-stale, subscription-expiry timers started');
 }

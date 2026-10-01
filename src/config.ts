@@ -57,6 +57,36 @@ export const config = {
      */
     itemsEditWindowSec: Number(process.env.BID_REQUEST_ITEMS_EDIT_SEC ?? 30),
   },
+  /**
+   * Self-ping to stop a free-tier host (Render) idling the instance out.
+   *
+   * Render spins a free service down after ~15 minutes with no inbound request,
+   * and the next caller pays a cold start. A request to our own public URL is
+   * inbound traffic, so polling it on a shorter interval keeps the dyno warm.
+   *
+   * Caveat worth knowing: this only *prevents* sleep. Once the process is down
+   * nothing inside it can wake it, so a deploy or crash still cold-starts the
+   * next real request. An external pinger is the only way to cover that.
+   *
+   * `url` is usually unnecessary on Render, which injects RENDER_EXTERNAL_URL.
+   */
+  keepAlive: {
+    enabled: process.env.KEEPALIVE_ENABLED
+      ? process.env.KEEPALIVE_ENABLED === 'true'
+      : isProd,
+    url: (
+      process.env.KEEPALIVE_URL ??
+      process.env.RENDER_EXTERNAL_URL ??
+      ''
+    ).replace(/\/+$/, ''),
+    /** Must stay comfortably under the host's idle timeout (~15 min on Render). */
+    intervalSec: Number(process.env.KEEPALIVE_INTERVAL_SEC ?? 600),
+    /**
+     * Optional "HH-HH" local-hour window, e.g. "6-23", to stay inside the free
+     * 750 instance-hours/month budget. Empty = around the clock.
+     */
+    activeHours: process.env.KEEPALIVE_ACTIVE_HOURS ?? '',
+  },
   slaHours: Number(process.env.SLA_HOURS ?? 8),
   inspectionWindowSec: Number(process.env.INSPECTION_WINDOW_SEC ?? 600),
   trackingStaleSec: Number(process.env.TRACKING_STALE_SEC ?? 120),
