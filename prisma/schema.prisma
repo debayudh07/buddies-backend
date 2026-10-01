@@ -176,6 +176,12 @@ model ConsumerProfile {
   pan            String?
   /// Standing drop-off instructions shown to delivery drivers.
   deliveryNotes  String?
+  /// Storage refs for the three KYC documents. Each gets its own column:
+  /// they previously all collapsed onto `aadhaarRef`, so uploading one
+  /// overwrote another and the GSTIN file was never persisted at all.
+  fssaiDocRef    String?
+  gstinDocRef    String?
+  idProofRef     String?
   addressLine    String?
   city           String?
   lat            Float?

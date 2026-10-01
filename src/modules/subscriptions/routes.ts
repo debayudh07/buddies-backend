@@ -50,7 +50,15 @@ subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
           },
         }
       : {
-          consumer_standard: { inr: 299, slots: '5 bid slots' },
+          // Free during launch: `introInr` is the price actually charged, `inr`
+          // is the list price shown struck through. The app reads both rather
+          // than hardcoding either.
+          consumer_standard: {
+            inr: 299,
+            introInr: 0,
+            intro: 'Free during launch',
+            slots: `${await getConsumerBidSlots(req.user!.id)} bid slots`,
+          },
         };
 
   res.json({

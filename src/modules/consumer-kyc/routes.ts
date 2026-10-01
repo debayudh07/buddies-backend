@@ -14,8 +14,12 @@ const kycSchema = z.object({
   ownerName: z.string().min(1),
   ownerPhone: z.string().min(8),
   aadhaarRef: z.string().optional().nullable(),
-  /** Client may send the ID/business-doc upload as docRef — stored on aadhaarRef. */
+  /** Legacy alias for the ID/business-doc upload; folded into idProofRef. */
   docRef: z.string().optional().nullable(),
+  /** Storage refs from POST /v1/uploads?purpose=kyc, one per document. */
+  fssaiDocRef: z.string().optional().nullable(),
+  gstinDocRef: z.string().optional().nullable(),
+  idProofRef: z.string().optional().nullable(),
   addressLine: z.string().min(1),
   city: z.string().optional().nullable(),
   publicLabel: z.string().optional().nullable(),
@@ -27,12 +31,21 @@ const kycSchema = z.object({
 });
 
 function toProfileData(data: z.infer<typeof kycSchema>) {
-  const aadhaarRef = data.aadhaarRef || data.docRef || null;
+  // Each document keeps its own column. `docRef`/`aadhaarRef` are the legacy
+  // single-slot fields: treat them as the ID proof when no explicit ref is sent.
+  //
+  // Document refs are left `undefined` when the client omits them, so Prisma
+  // skips the column. Writing null instead would erase an already-uploaded
+  // document on every later save of the form.
+  const idProofRef = data.idProofRef || data.aadhaarRef || data.docRef || undefined;
   return {
     restaurantName: data.restaurantName.trim(),
     ownerName: data.ownerName.trim(),
     ownerPhone: data.ownerPhone.trim(),
-    aadhaarRef,
+    aadhaarRef: idProofRef,
+    idProofRef,
+    fssaiDocRef: data.fssaiDocRef || undefined,
+    gstinDocRef: data.gstinDocRef || undefined,
     addressLine: data.addressLine.trim(),
     city: data.city?.trim() ? data.city.trim() : null,
     publicLabel: data.publicLabel?.trim() ? data.publicLabel.trim() : null,
