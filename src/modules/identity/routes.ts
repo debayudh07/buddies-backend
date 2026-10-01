@@ -201,6 +201,10 @@ const consumerProfileSchema = z.object({
   lat: z.number().optional(),
   lng: z.number().optional(),
   displayName: z.string().optional(),
+  /** Lives on User, not ConsumerProfile — split out in the handler. */
+  email: z.string().trim().email().optional(),
+  /** Standing drop-off instructions for delivery drivers. */
+  deliveryNotes: z.string().trim().max(500).optional(),
 });
 
 identityRouter.put(
@@ -209,9 +213,14 @@ identityRouter.put(
   requireRole('consumer'),
   validateBody(consumerProfileSchema),
   async (req, res) => {
-    const { displayName, ...profile } = req.body as z.infer<typeof consumerProfileSchema>;
-    if (displayName) {
-      await prisma.user.update({ where: { id: req.user!.id }, data: { displayName } });
+    const { displayName, email, ...profile } = req.body as z.infer<
+      typeof consumerProfileSchema
+    >;
+    if (displayName || email) {
+      await prisma.user.update({
+        where: { id: req.user!.id },
+        data: { ...(displayName ? { displayName } : {}), ...(email ? { email } : {}) },
+      });
     }
     const consumer = await prisma.consumerProfile.upsert({
       where: { userId: req.user!.id },

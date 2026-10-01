@@ -170,6 +170,12 @@ model ConsumerProfile {
   ownerPhone     String?
   publicLabel    String?
   aadhaarRef     String?
+  /// 14-digit FSSAI food licence number.
+  fssai          String?
+  /// Business PAN.
+  pan            String?
+  /// Standing drop-off instructions shown to delivery drivers.
+  deliveryNotes  String?
   addressLine    String?
   city           String?
   lat            Float?

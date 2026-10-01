@@ -19,6 +19,9 @@ const kycSchema = z.object({
   addressLine: z.string().min(1),
   city: z.string().optional().nullable(),
   publicLabel: z.string().optional().nullable(),
+  /** 14-digit FSSAI food licence; optional until the shop is ready to submit. */
+  fssai: z.string().optional().nullable(),
+  pan: z.string().optional().nullable(),
   lat: z.number().finite().optional().nullable(),
   lng: z.number().finite().optional().nullable(),
 });
@@ -33,6 +36,8 @@ function toProfileData(data: z.infer<typeof kycSchema>) {
     addressLine: data.addressLine.trim(),
     city: data.city?.trim() ? data.city.trim() : null,
     publicLabel: data.publicLabel?.trim() ? data.publicLabel.trim() : null,
+    fssai: data.fssai?.trim() ? data.fssai.trim() : null,
+    pan: data.pan?.trim() ? data.pan.trim() : null,
     lat: data.lat ?? null,
     lng: data.lng ?? null,
   };
