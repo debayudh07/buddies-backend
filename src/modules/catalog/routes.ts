@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate } from '../../middleware/auth';
 import { presentCatalog } from '../../lib/product-catalog';
 import { cacheGet, cacheSet } from '../../lib/response-cache';
+import { getMarketPriceIndex } from './market-prices';
 
 export const catalogRouter = Router();
 
@@ -20,11 +21,23 @@ catalogRouter.get('/catalog/order-items', authenticate, async (req, res) => {
     res.json(cached);
     return;
   }
-  const payload = presentCatalog({
+  const base = presentCatalog({
     q,
     category,
     ...(full ? { previewLimit: Number.MAX_SAFE_INTEGER } : {}),
   });
+  // Live median of recent winning bids; falls back to the category band in the app.
+  const market = await getMarketPriceIndex().catch(() => new Map());
+  const payload = {
+    ...base,
+    categories: base.categories.map((c) => ({
+      ...c,
+      items: c.items.map((i) => {
+        const m = market.get(`${c.slug}:${i.slug}`);
+        return m ? { ...i, marketPaise: m.paise, marketSamples: m.samples } : i;
+      }),
+    })),
+  };
   await cacheSet(cacheKey, payload, CATALOG_TTL_MS);
   res.setHeader('X-Cache', 'MISS');
   res.json(payload);

@@ -831,6 +831,38 @@ export function packSizeOptionsForKind(kind: PackSizeKind | null): string[] {
   return [];
 }
 
+/**
+ * Indicative wholesale rate bands per category, in paise per `per` unit (kg for
+ * weight categories, including those ordered in grams). These are rough
+ * reference ranges shown as "indicative" in the app; once enough winning bids
+ * exist for an item, the live market median (see catalog/market-prices.ts)
+ * replaces them in the UI.
+ */
+export type CategoryPriceRef = { minPaise: number; maxPaise: number; per: 'kg' | 'L' | 'pcs' };
+
+export const CATEGORY_PRICE_REF: Record<string, CategoryPriceRef> = {
+  rice_rice_products: { minPaise: 5500, maxPaise: 14000, per: 'kg' },
+  dals_pulses_legumes: { minPaise: 8000, maxPaise: 18000, per: 'kg' },
+  spices_indian_masala: { minPaise: 25000, maxPaise: 120000, per: 'kg' },
+  flours_sugar: { minPaise: 3500, maxPaise: 6500, per: 'kg' },
+  cooking_oils_fats: { minPaise: 10000, maxPaise: 18000, per: 'L' },
+  fresh_dairy: { minPaise: 5500, maxPaise: 9000, per: 'L' },
+  butter_cheese: { minPaise: 40000, maxPaise: 70000, per: 'kg' },
+  meat_poultry_seafood_eggs: { minPaise: 15000, maxPaise: 80000, per: 'kg' },
+  fruits: { minPaise: 4000, maxPaise: 30000, per: 'kg' },
+  dry_fruits_nuts: { minPaise: 40000, maxPaise: 200000, per: 'kg' },
+  vegetables: { minPaise: 2000, maxPaise: 10000, per: 'kg' },
+  bakery_ingredients_essentials: { minPaise: 4000, maxPaise: 35000, per: 'pcs' },
+  chocolate_cocoa: { minPaise: 25000, maxPaise: 60000, per: 'kg' },
+  sauces_condiments_dips: { minPaise: 6000, maxPaise: 30000, per: 'pcs' },
+  syrups_crushes_purees: { minPaise: 25000, maxPaise: 70000, per: 'pcs' },
+  tea_coffee: { minPaise: 30000, maxPaise: 120000, per: 'kg' },
+  cold_non_alcoholic_beverages: { minPaise: 1500, maxPaise: 12000, per: 'pcs' },
+  packaging_disposables: { minPaise: 300, maxPaise: 3500, per: 'pcs' },
+  commercial_kitchen_cleaning: { minPaise: 5000, maxPaise: 40000, per: 'pcs' },
+  kitchen_utility_hygiene: { minPaise: 3000, maxPaise: 40000, per: 'pcs' },
+};
+
 export function presentCatalog(opts?: { q?: string; category?: string; previewLimit?: number }) {
   const q = (opts?.q ?? '').trim().toLowerCase();
   const categoryFilter = opts?.category?.trim();
@@ -859,6 +891,7 @@ export function presentCatalog(opts?: { q?: string; category?: string; previewLi
         packSizeKind: packSizeKindForCategory(c),
         packSizeOptions: packSizeOptionsForKind(packSizeKindForCategory(c)),
         itemCount: c.items.length,
+        refPrice: CATEGORY_PRICE_REF[c.slug] ?? null,
         items: (q ? itemsOut : c.items).map((i) => ({
           slug: i.slug,
           name: i.name,
