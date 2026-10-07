@@ -8,6 +8,7 @@ import { connectDatabase } from './lib/prisma';
 import { ensureStorageBuckets } from './lib/storage';
 import { initFirebase } from './lib/notify';
 import { logger } from './lib/logger';
+import { ensureReturnWindows } from './lib/seed-return-windows';
 
 async function main() {
   if (config.isProd && config.allowedOrigins.length === 0) {
@@ -26,6 +27,11 @@ async function main() {
 
   await connectDatabase();
   await ensureStorageBuckets();
+  await ensureReturnWindows().catch((e) =>
+    logger.warn('boot', 'return window seed failed', {
+      error: e instanceof Error ? e.message : String(e),
+    }),
+  );
   initFirebase();
   await connectRedis(); // logs connected OK / not connected
 

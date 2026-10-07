@@ -7,6 +7,8 @@ import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError, assertFound } from '../../lib/errors';
 import { uploadBuffer } from '../../lib/storage';
+import { PRODUCT_CATEGORIES, normalizeProductCategory } from '../../lib/product-categories';
+import { resolveReturnWindow } from '../../lib/seed-return-windows';
 import {
   applySupplierDecision,
   consumerAck,
@@ -42,8 +44,17 @@ returnsRouter.get('/returns/policy', authenticate, async (_req, res) => {
 });
 
 returnsRouter.get('/returns/windows', authenticate, async (_req, res) => {
-  const windows = await prisma.returnWindowMatrix.findMany({ orderBy: { productCategory: 'asc' } });
-  res.json({ windows });
+  const rows = await prisma.returnWindowMatrix.findMany({ orderBy: { productCategory: 'asc' } });
+  // Fill in any built-in category the DB has no row for, so clients never see a gap.
+  const have = new Set(rows.map((r) => r.productCategory));
+  const missing = PRODUCT_CATEGORIES.filter((c) => !have.has(c.productCategory)).map((c) => ({
+    id: `builtin:${c.productCategory}`,
+    productCategory: c.productCategory,
+    windowHours: c.windowHours,
+    validReasons: c.validReasons,
+    exampleItems: c.exampleItems,
+  }));
+  res.json({ windows: [...rows, ...missing] });
 });
 
 returnsRouter.get('/catalog/shelf-life-matrix', authenticate, async (_req, res) => {
@@ -158,25 +169,35 @@ returnsRouter.post(
       throw new AppError(400, 'INVALID_LINE_ITEMS', 'Return items must belong to this order');
     }
     const selected = allowed.filter((i) => lineItemIds.includes(i.id));
+    // Compare normalised slugs so stray whitespace / legacy aliases don't cause a mismatch.
+    const requestedCategory = normalizeProductCategory(req.body.productCategory);
     const selectedCats = new Set(
-      selected.map((i) => i.productCategory).filter((c): c is string => !!c && c.trim().length > 0),
+      selected
+        .map((i) => normalizeProductCategory(i.productCategory))
+        .filter((c): c is string => !!c),
     );
-    if (selectedCats.size !== 1 || !selectedCats.has(req.body.productCategory)) {
+    if (selectedCats.size > 1) {
       throw new AppError(
         400,
         'ORDER_CATEGORY_MISMATCH',
-        'Product category must match the selected order items — one category per claim',
+        `These items belong to different categories (${[...selectedCats].join(', ')}) — file one claim per category`,
       );
     }
+    if (selectedCats.size === 0 || !requestedCategory || !selectedCats.has(requestedCategory)) {
+      throw new AppError(
+        400,
+        'ORDER_CATEGORY_MISMATCH',
+        `Category "${req.body.productCategory}" does not match the selected items`,
+      );
+    }
+    req.body.productCategory = requestedCategory;
 
-    const window = await prisma.returnWindowMatrix.findUnique({
-      where: { productCategory: req.body.productCategory },
-    });
+    const window = await resolveReturnWindow(requestedCategory);
     if (!window) {
       throw new AppError(
         400,
         'UNKNOWN_CATEGORY',
-        'Unknown product category — pick one from the return windows list',
+        `No return window is configured for "${requestedCategory}"`,
       );
     }
     if (window.validReasons.length > 0 && !window.validReasons.includes(req.body.reasonCode)) {
@@ -341,9 +362,7 @@ returnsRouter.post('/return-claims/:id/submit', authenticate, requireRole('consu
 
   // Re-check absolute delivery window (fixes old drafts that used now+hours).
   let deadline = claim.windowDeadline;
-  const window = await prisma.returnWindowMatrix.findUnique({
-    where: { productCategory: claim.productCategory },
-  });
+  const window = await resolveReturnWindow(claim.productCategory);
   if (claim.order.deliveredAt && window) {
     deadline = new Date(
       claim.order.deliveredAt.getTime() + window.windowHours * 3_600_000,
