@@ -214,14 +214,22 @@ returnsRouter.post(
     // claimed again — only a fully rejected prior claim allows a retry.
     const priorClaims = await prisma.returnClaim.findMany({
       where: { orderId: order.id, lineItemIds: { hasSome: lineItemIds } },
-      select: { status: true },
+      select: { id: true, status: true },
     });
-    if (priorClaims.some((c) => c.status !== 'rejected')) {
+    if (priorClaims.some((c) => c.status !== 'rejected' && c.status !== 'draft')) {
       throw new AppError(
         400,
         'ALREADY_RETURNED',
         'One or more of these items already has an active or completed return claim',
       );
+    }
+    // Unsubmitted drafts (e.g. a previous attempt whose photo upload failed) must not
+    // block a retry — supersede them. Evidence rows cascade with the claim.
+    const staleDraftIds = priorClaims.filter((c) => c.status === 'draft').map((c) => c.id);
+    if (staleDraftIds.length > 0) {
+      await prisma.returnClaim.deleteMany({
+        where: { id: { in: staleDraftIds }, consumerUserId: req.user!.id, status: 'draft' },
+      });
     }
 
     const claim = await prisma.returnClaim.create({

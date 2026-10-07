@@ -230,7 +230,9 @@ export async function buildLedger(opts: {
     );
     const invoiceNumber = order.gstInvoice?.invoiceNumber ?? null;
 
-    if (OPEN_STATUSES.has(order.status)) {
+    // Consumers see money movement only (payments made, refunds received) — no
+    // deliveries or in-flight orders; those live on the Orders tab.
+    if (role === 'supplier' && OPEN_STATUSES.has(order.status)) {
       open.push({
         orderId: order.id,
         orderCode: order.orderCode,
@@ -240,9 +242,9 @@ export async function buildLedger(opts: {
       });
     }
 
-    if (DELIVERED_STATUSES.has(order.status) && amountPaise > 0) {
+    if (role === 'supplier' && DELIVERED_STATUSES.has(order.status) && amountPaise > 0) {
       const at = order.deliveredAt ?? order.updatedAt ?? order.createdAt;
-      const debitPaise = role === 'consumer' ? amountPaise : 0;
+      const debitPaise = 0;
       const creditPaise = role === 'supplier' ? amountPaise : 0;
       allLines.push({
         at,
@@ -278,7 +280,8 @@ export async function buildLedger(opts: {
           role === 'supplier'
             ? `Payment received · ${order.orderCode}`
             : `Paid · ${order.orderCode}`,
-        dueDeltaPaise: -amountPaise,
+        // Supplier: reduces what is still due. Consumer: raises net paid.
+        dueDeltaPaise: role === 'consumer' ? amountPaise : -amountPaise,
         debitPaise,
         creditPaise,
       });
@@ -425,8 +428,12 @@ export async function buildLedger(opts: {
     openingDuePaise = running;
   }
 
+  // Supplier balance = amount still due. Consumer balance = net paid
+  // (payments made minus refunds received).
   const closingDuePaise =
-    openingDuePaise + billedPaise - settledPaise - refundedPaise;
+    role === 'consumer'
+      ? openingDuePaise + settledPaise - refundedPaise
+      : openingDuePaise + billedPaise - settledPaise - refundedPaise;
 
   const entries =
     windowed.length > ENTRY_CAP
