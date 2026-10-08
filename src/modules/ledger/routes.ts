@@ -23,10 +23,9 @@ ledgerRouter.get(
     if (!parsed.success) {
       throw new AppError(400, 'INVALID_QUERY', 'Bad ledger query');
     }
-    const role = req.user!.role;
-    if (role !== 'supplier' && role !== 'consumer') {
-      throw new AppError(403, 'FORBIDDEN', 'Ledger is for shops and restaurants');
-    }
+    // Admin accounts (e.g. an owner testing the supplier app) get the supplier
+    // view instead of an error; they only see data they own.
+    const role = req.user!.role === 'consumer' ? 'consumer' : 'supplier';
 
     const book = await buildLedger({
       userId: req.user!.id,

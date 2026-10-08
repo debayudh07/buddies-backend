@@ -1577,8 +1577,12 @@ bidzoneRouter.post(
 /** Public-ish supplier performance for bid cards */
 bidzoneRouter.get('/suppliers/:id/performance', authenticate, async (req, res) => {
   const profile = assertFound(
-    await prisma.supplierProfile.findUnique({
-      where: { id: requireParam(req, 'id') },
+    // Accepts the supplier profile id or the owning user id (the supplier app
+    // only knows its user id).
+    await prisma.supplierProfile.findFirst({
+      where: {
+        OR: [{ id: requireParam(req, 'id') }, { userId: requireParam(req, 'id') }],
+      },
       select: {
         id: true,
         publicLabel: true,
