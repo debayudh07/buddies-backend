@@ -9,6 +9,7 @@ import {
   getConsumerBidSlots,
   getSupplierBidQuotaInfo,
   subscribe,
+  SUPPLIER_PLAN_PRICE_INR,
   SUPPLIER_PREMIUM_BID_CAP,
 } from './service';
 
@@ -39,13 +40,13 @@ subscriptionsRouter.get('/subscriptions/me', authenticate, async (req, res) => {
     req.user!.role === 'supplier'
       ? {
           supplier_standard: {
-            inr: 299,
-            introInr: 99,
+            inr: SUPPLIER_PLAN_PRICE_INR.supplier_standard.list,
+            introInr: SUPPLIER_PLAN_PRICE_INR.supplier_standard.intro,
             months: 'first 3 months intro',
             concurrentBids: 5,
           },
           supplier_premium: {
-            inr: 599,
+            inr: SUPPLIER_PLAN_PRICE_INR.supplier_premium.list,
             concurrentBids: SUPPLIER_PREMIUM_BID_CAP,
           },
         }

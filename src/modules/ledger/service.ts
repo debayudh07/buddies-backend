@@ -1,5 +1,6 @@
 import { prisma } from '../../lib/prisma';
 import { publicSupplierLabel, sanitizeLabel } from '../../lib/user-present';
+import { subscriptionChargePaise } from '../subscriptions/service';
 
 export type LedgerKind = 'all' | 'delivery' | 'payment' | 'return';
 
@@ -471,5 +472,185 @@ export async function buildLedger(opts: {
     parties,
     open: open.slice(0, 20),
     entries,
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Supplier's own cash book: money in (+) and money out (−), independent of
+// which restaurant owes what.
+// ---------------------------------------------------------------------------
+
+export type CashBookKind = 'received' | 'refund' | 'subscription';
+
+export type CashBookEntry = {
+  at: string;
+  kind: CashBookKind;
+  orderId: string | null;
+  orderCode: string | null;
+  returnId: string | null;
+  invoiceNumber: string | null;
+  partyLabel: string | null;
+  particular: string;
+  /** Positive = money in, negative = money out. */
+  signedPaise: number;
+  /** Running cash position after this line (full history walk). */
+  balancePaise: number;
+};
+
+export type CashBookResult = {
+  summary: {
+    openingPaise: number;
+    /** Total money in for the window (positive). */
+    inPaise: number;
+    /** Total money out for the window (negative). */
+    outPaise: number;
+    closingPaise: number;
+  };
+  entries: CashBookEntry[];
+};
+
+export async function buildSupplierCashBook(opts: {
+  userId: string;
+  from?: string;
+  to?: string;
+}): Promise<CashBookResult> {
+  const now = new Date();
+  const from = parseDate(opts.from, startOfMonth(now));
+  const to = parseDate(opts.to, endOfDay(now));
+
+  const [orders, subs] = await Promise.all([
+    prisma.order.findMany({
+      where: { supplierUserId: opts.userId },
+      orderBy: { createdAt: 'asc' },
+      take: 2_000,
+      select: {
+        id: true,
+        orderCode: true,
+        consumerUserId: true,
+        createdAt: true,
+        updatedAt: true,
+        bid: { select: { amountPaise: true } },
+        offlinePayment: { select: { status: true, confirmedAt: true, updatedAt: true } },
+        gstInvoice: { select: { invoiceNumber: true } },
+        returnClaims: {
+          select: {
+            id: true,
+            status: true,
+            resolutionType: true,
+            refundAmountPaise: true,
+            refundReceivedAt: true,
+            closedAt: true,
+            decidedAt: true,
+            updatedAt: true,
+          },
+        },
+      },
+    }),
+    prisma.subscription.findMany({
+      where: { userId: opts.userId, plan: { in: ['supplier_standard', 'supplier_premium'] } },
+      orderBy: { startsAt: 'asc' },
+      select: { id: true, plan: true, introPrice: true, startsAt: true },
+    }),
+  ]);
+
+  const consumerIds = [...new Set(orders.map((o) => o.consumerUserId))];
+  const profiles =
+    consumerIds.length > 0
+      ? await prisma.consumerProfile.findMany({
+          where: { userId: { in: consumerIds } },
+          select: { userId: true, restaurantName: true },
+        })
+      : [];
+  const nameByUser = new Map(profiles.map((p) => [p.userId, sanitizeLabel(p.restaurantName) ?? 'Restaurant']));
+
+  type Line = Omit<CashBookEntry, 'at' | 'balancePaise'> & { at: Date };
+  const lines: Line[] = [];
+
+  for (const o of orders) {
+    const amount = o.bid?.amountPaise ?? 0;
+    const party = nameByUser.get(o.consumerUserId) ?? 'Restaurant';
+    const invoiceNumber = o.gstInvoice?.invoiceNumber ?? null;
+    const pay = o.offlinePayment;
+    if (pay?.status === 'confirmed_by_supplier' && amount > 0) {
+      lines.push({
+        at: pay.confirmedAt ?? pay.updatedAt ?? o.updatedAt,
+        kind: 'received',
+        orderId: o.id,
+        orderCode: o.orderCode,
+        returnId: null,
+        invoiceNumber,
+        partyLabel: party,
+        particular: `Received from ${party} · ${o.orderCode}`,
+        signedPaise: amount,
+      });
+    }
+    for (const c of o.returnClaims) {
+      const refunded =
+        (c.status === 'refunded' || c.status === 'closed') &&
+        c.resolutionType === 'refund' &&
+        (c.refundAmountPaise ?? 0) > 0;
+      if (!refunded) continue;
+      lines.push({
+        at: c.refundReceivedAt ?? c.closedAt ?? c.decidedAt ?? c.updatedAt,
+        kind: 'refund',
+        orderId: o.id,
+        orderCode: o.orderCode,
+        returnId: c.id,
+        invoiceNumber,
+        partyLabel: party,
+        particular: `Refund to ${party} · ${o.orderCode}`,
+        signedPaise: -(c.refundAmountPaise ?? 0),
+      });
+    }
+  }
+
+  for (const sub of subs) {
+    const charge = subscriptionChargePaise(sub.plan, sub.introPrice);
+    if (charge <= 0) continue;
+    lines.push({
+      at: sub.startsAt,
+      kind: 'subscription',
+      orderId: null,
+      orderCode: null,
+      returnId: null,
+      invoiceNumber: null,
+      partyLabel: null,
+      particular: `Buddies ${sub.plan === 'supplier_premium' ? 'Premium' : 'Standard'} plan${sub.introPrice ? ' (intro price)' : ''}`,
+      signedPaise: -charge,
+    });
+  }
+
+  lines.sort((a, b) => a.at.getTime() - b.at.getTime());
+
+  let running = 0;
+  let opening = 0;
+  let openingCaptured = false;
+  let inPaise = 0;
+  let outPaise = 0;
+  const entries: CashBookEntry[] = [];
+  for (const l of lines) {
+    const t = l.at.getTime();
+    if (!openingCaptured && t >= from.getTime()) {
+      opening = running;
+      openingCaptured = true;
+    }
+    running += l.signedPaise;
+    if (t >= from.getTime() && t <= to.getTime()) {
+      if (l.signedPaise > 0) inPaise += l.signedPaise;
+      else outPaise += l.signedPaise;
+      entries.push({ ...l, at: l.at.toISOString(), balancePaise: running });
+    }
+  }
+  if (!openingCaptured) opening = running;
+
+  return {
+    summary: {
+      openingPaise: opening,
+      inPaise,
+      outPaise,
+      closingPaise: opening + inPaise + outPaise,
+    },
+    entries: entries.length > ENTRY_CAP ? entries.slice(entries.length - ENTRY_CAP) : entries,
   };
 }

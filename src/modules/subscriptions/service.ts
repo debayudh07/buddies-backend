@@ -95,6 +95,19 @@ export async function subscribe(
   });
 }
 
+/** Supplier plan prices in rupees. `intro` applies when the plan was bought at the intro price. */
+export const SUPPLIER_PLAN_PRICE_INR = {
+  supplier_standard: { list: 299, intro: 99 },
+  supplier_premium: { list: 599, intro: 599 },
+} as const;
+
+/** What a subscription row cost the supplier, in paise (0 for non-supplier plans). */
+export function subscriptionChargePaise(plan: string, introPrice: boolean): number {
+  const p = SUPPLIER_PLAN_PRICE_INR[plan as keyof typeof SUPPLIER_PLAN_PRICE_INR];
+  if (!p) return 0;
+  return (introPrice ? p.intro : p.list) * 100;
+}
+
 const CONSUMER_BID_SLOTS = 5;
 const SUPPLIER_BID_CAP = 5;
 const SUPPLIER_PREMIUM_BID_CAP = 5;

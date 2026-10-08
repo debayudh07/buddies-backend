@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { authenticate, blockHandoff, requireRole } from '../../middleware/auth';
 import { AppError } from '../../lib/errors';
-import { buildLedger, type LedgerKind } from './service';
+import { buildLedger, buildSupplierCashBook, type LedgerKind } from './service';
 
 export const ledgerRouter = Router();
 
@@ -38,5 +38,29 @@ ledgerRouter.get(
     });
 
     res.json(book);
+  },
+);
+
+const cashBookQuery = z.object({
+  from: z.string().optional(),
+  to: z.string().optional(),
+});
+
+/** The supplier's own money in / money out book (received, refunds paid, plan fees). */
+ledgerRouter.get(
+  '/ledger/cashbook',
+  authenticate,
+  blockHandoff,
+  requireRole('supplier'),
+  async (req, res) => {
+    const parsed = cashBookQuery.safeParse(req.query);
+    if (!parsed.success) throw new AppError(400, 'INVALID_QUERY', 'Bad cash book query');
+    res.json(
+      await buildSupplierCashBook({
+        userId: req.user!.id,
+        from: parsed.data.from,
+        to: parsed.data.to,
+      }),
+    );
   },
 );
