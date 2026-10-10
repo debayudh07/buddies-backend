@@ -282,6 +282,19 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
           take: 50,
         });
 
+  const myLiveByRequest = new Map<string, Date | null>();
+  if (profile && requests.length > 0) {
+    const mine = await prisma.bid.findMany({
+      where: {
+        supplierId: profile.id,
+        bidRequestId: { in: requests.map((r) => r.id) },
+        ...activeUnexpiredWhere(now),
+      },
+      select: { bidRequestId: true, expiresAt: true },
+    });
+    for (const b of mine) myLiveByRequest.set(b.bidRequestId, b.expiresAt);
+  }
+
   const feed = requests.map((r: (typeof requests)[number]) => {
     let distanceKm: number | null = null;
     if (profile?.lat != null && profile?.lng != null && r.lat != null && r.lng != null) {
@@ -312,6 +325,8 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
       bestBidPaise: best?.amountPaise ?? null,
       minDecrementPaise,
       maxBidPaise,
+      hasLiveBid: myLiveByRequest.has(r.id),
+      myLiveBidExpiresAt: myLiveByRequest.get(r.id)?.toISOString() ?? null,
     };
   });
 
@@ -361,21 +376,35 @@ bidzoneRouter.post(
     const profile = await requireVerifiedSupplier(req.user!.id);
 
     const quotaInfo = await getSupplierBidQuotaInfo(req.user!.id);
-    // A still-live earlier bid on THIS request is auto-withdrawn below when the
-    // new one is placed, so it must not count against the concurrent-bid cap —
-    // otherwise a supplier at the cap can never revise a bid that hasn't expired.
+    const now = new Date();
+    const liveOnThis = await prisma.bid.findFirst({
+      where: {
+        supplierId: profile.id,
+        bidRequestId: body.bidRequestId,
+        ...activeUnexpiredWhere(now),
+      },
+      select: { id: true, expiresAt: true },
+    });
+    if (liveOnThis) {
+      throw new AppError(
+        409,
+        'BID_STILL_LIVE',
+        'Your first bid on this request is still live. Wait until it runs out before placing another.',
+      );
+    }
+
     const activeCount = await prisma.bid.count({
       where: {
         supplierId: profile.id,
-        ...activeUnexpiredWhere(),
-        bidRequestId: { not: body.bidRequestId },
+        ...activeUnexpiredWhere(now),
       },
     });
     if (activeCount >= quotaInfo.cap) {
       throw new AppError(
         403,
         'BID_QUOTA_EXCEEDED',
-        quotaInfo.reason ?? `Max ${quotaInfo.cap} concurrent bids`,
+        quotaInfo.reason ??
+          `All ${quotaInfo.cap} bid slots are filled. A slot frees when one of your bids runs out.`,
       );
     }
 
@@ -606,14 +635,32 @@ bidzoneRouter.post(
     const bidExpiresAt = computeBidExpiresAt(liveEndsAt);
 
     const bid = await prisma.$transaction(async (tx) => {
+      // Free stale rows the worker has not marked yet. Do not withdraw a live bid.
       await tx.bid.updateMany({
         where: {
           bidRequestId: bidRequest.id,
           supplierId: profile.id,
           status: 'active',
+          expiresAt: { lte: now },
         },
-        data: { status: 'withdrawn' },
+        data: { status: 'expired' },
       });
+
+      const stillLive = await tx.bid.findFirst({
+        where: {
+          bidRequestId: bidRequest.id,
+          supplierId: profile.id,
+          ...activeUnexpiredWhere(now),
+        },
+        select: { id: true },
+      });
+      if (stillLive) {
+        throw new AppError(
+          409,
+          'BID_STILL_LIVE',
+          'Your first bid on this request is still live. Wait until it runs out before placing another.',
+        );
+      }
 
       const createdBid = await tx.bid.create({
         data: {
