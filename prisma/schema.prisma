@@ -307,6 +307,8 @@ model BidRequestItem {
   minimumOrderUnit String?
   /// Pack size: Small/Medium/Large for pcs, or 180ml/250ml/750ml/1L/2L for beverages.
   packSize         String?
+  /// Optional preferred brand for this line (restaurant hint, not a catalog key).
+  brand            String?
   awardedBidId     String?
 
   bidRequest BidRequest    @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)

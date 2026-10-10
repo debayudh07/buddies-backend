@@ -924,6 +924,7 @@ export type IncomingCatalogLine = {
   productCategory?: string;
   gradeHint?: string;
   packSize?: string;
+  brand?: string;
 };
 
 export type CanonicalLine = {
@@ -937,6 +938,7 @@ export type CanonicalLine = {
   minimumOrderUnit: CatalogUnit;
   gradeHint?: string;
   packSize?: string;
+  brand?: string;
 };
 
 function normalizeUnit(raw?: string | null): CatalogUnit | null {
@@ -1046,7 +1048,14 @@ export function canonicalizeLine(input: IncomingCatalogLine): CanonicalLine | Ca
     minimumOrderUnit: resolved.category.moqUnit,
     gradeHint: input.gradeHint,
     packSize: packKind ? packSize : undefined,
+    brand: sanitizeBrand(input.brand),
   };
+}
+
+function sanitizeBrand(raw?: string): string | undefined {
+  const brand = raw?.trim().replace(/\s+/g, ' ');
+  if (!brand) return undefined;
+  return brand.slice(0, 80);
 }
 
 export type CartRuleError = {

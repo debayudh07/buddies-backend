@@ -267,6 +267,7 @@ bidzoneRouter.get('/supplier/bidzone', authenticate, requireRole('supplier'), as
                 minimumOrderQty: true,
                 minimumOrderUnit: true,
                 packSize: true,
+                brand: true,
                 status: true,
               },
             },

@@ -56,6 +56,7 @@ const catalogItemSchema = z.object({
   productCategory: knownCategory.optional(),
   gradeHint: z.string().optional(),
   packSize: z.string().min(1).optional(),
+  brand: z.string().trim().max(80).optional(),
 });
 
 function canonicalizeItems(raw: IncomingCatalogLine[]): CanonicalLine[] {
@@ -81,6 +82,7 @@ function canonicalizeItems(raw: IncomingCatalogLine[]): CanonicalLine[] {
         minimumOrderUnit: (line.unit as CanonicalLine['unit']) ?? 'kg',
         gradeHint: line.gradeHint,
         packSize: line.packSize,
+        brand: line.brand?.trim() || undefined,
       });
       continue;
     }
@@ -107,6 +109,7 @@ function itemCreateData(i: CanonicalLine) {
     minimumOrderQty: i.minimumOrderQty || null,
     minimumOrderUnit: i.minimumOrderUnit || null,
     packSize: i.packSize || null,
+    brand: i.brand || null,
   };
 }
 
@@ -400,6 +403,7 @@ demandRouter.get('/consumer/bid-requests', authenticate, requireRole('consumer')
           minimumOrderQty: true,
           minimumOrderUnit: true,
           packSize: true,
+          brand: true,
           status: true,
         },
       },
@@ -829,6 +833,7 @@ demandRouter.post(
             minimumOrderQty: i.minimumOrderQty,
             minimumOrderUnit: i.minimumOrderUnit,
             packSize: i.packSize,
+            brand: i.brand,
           })),
         },
       },
