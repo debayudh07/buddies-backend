@@ -3,6 +3,7 @@ import { config } from '../config';
 import { sendPush } from '../lib/notify';
 import { logger } from '../lib/logger';
 import { expireSubscriptions } from '../modules/subscriptions/service';
+import { emitAuction, emitBidzone, emitUser } from '../lib/realtime';
 
 export type WorkerTickResult = { processed: number };
 
@@ -11,30 +12,59 @@ export async function tickAuctionExpiry(): Promise<WorkerTickResult> {
   const now = new Date();
   let processed = 0;
 
-  const expired = await prisma.bidRequest.updateMany({
+  const expiring = await prisma.bidRequest.findMany({
     where: { status: 'open', liveEndsAt: { lt: now } },
-    data: { status: 'expired' },
+    select: { id: true, consumer: { select: { userId: true } } },
+    take: 100,
   });
-  if (expired.count > 0) {
-    await prisma.bid.updateMany({
-      where: { status: 'active', bidRequest: { status: 'expired' } },
+  if (expiring.length > 0) {
+    const ids = expiring.map((r) => r.id);
+    await prisma.bidRequest.updateMany({
+      where: { id: { in: ids } },
       data: { status: 'expired' },
     });
-    logger.info('worker', 'expired auctions', { count: expired.count });
-    processed += expired.count;
+    await prisma.bid.updateMany({
+      where: { status: 'active', bidRequestId: { in: ids } },
+      data: { status: 'expired' },
+    });
+    for (const r of expiring) {
+      emitAuction(r.id, 'auction.expired', { bidRequestId: r.id, status: 'expired' });
+      emitBidzone('all', 'demand.request_closed', { id: r.id, status: 'expired' });
+      emitUser(r.consumer.userId, 'bidRequest.updated', { id: r.id, status: 'expired' });
+    }
+    logger.info('worker', 'expired auctions', { count: expiring.length });
+    processed += expiring.length;
   }
 
-  // Per-bid TTL (default 5 minutes) — free quota and hide stale offers
-  const staleBids = await prisma.bid.updateMany({
+  // Per-bid TTL (default 5 minutes) — free quota and hide stale offers.
+  // Requests expired above already closed their bids, so this is TTL-only.
+  const staleBids = await prisma.bid.findMany({
     where: {
       status: 'active',
       expiresAt: { lt: now },
     },
-    data: { status: 'expired' },
+    select: {
+      id: true,
+      bidRequestId: true,
+      supplier: { select: { userId: true } },
+    },
+    take: 200,
   });
-  if (staleBids.count > 0) {
-    logger.info('worker', 'expired bids by TTL', { count: staleBids.count });
-    processed += staleBids.count;
+  if (staleBids.length > 0) {
+    await prisma.bid.updateMany({
+      where: { id: { in: staleBids.map((b) => b.id) } },
+      data: { status: 'expired' },
+    });
+    for (const b of staleBids) {
+      emitAuction(b.bidRequestId, 'auction.bid_expired', { bidId: b.id });
+      emitUser(b.supplier.userId, 'bid.status_changed', {
+        bidId: b.id,
+        status: 'expired',
+        bidRequestId: b.bidRequestId,
+      });
+    }
+    logger.info('worker', 'expired bids by TTL', { count: staleBids.length });
+    processed += staleBids.length;
   }
 
   return { processed };

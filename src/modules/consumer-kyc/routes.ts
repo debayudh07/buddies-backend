@@ -6,6 +6,7 @@ import { requireParam } from '../../middleware/params';
 import { validateBody } from '../../middleware/validate';
 import { AppError } from '../../lib/errors';
 import { recordAdminAudit } from '../admin/audit';
+import { emitUser } from '../../socket';
 
 export const consumerKycRouter = Router();
 
@@ -157,6 +158,7 @@ consumerKycRouter.post(
       action: 'kyc.verify',
       target: `consumer:${userId}`,
     });
+    emitUser(userId, 'profile.updated', { kycStatus: 'verified' });
     res.json({ profile });
   },
 );
@@ -176,6 +178,7 @@ consumerKycRouter.post(
       action: 'kyc.reject',
       target: `consumer:${userId}`,
     });
+    emitUser(userId, 'profile.updated', { kycStatus: 'rejected' });
     res.json({ profile });
   },
 );
@@ -215,6 +218,7 @@ consumerKycRouter.post(
           },
         });
 
+    emitUser(userId, 'profile.updated', { kycStatus: 'verified' });
     res.json({ profile });
   },
 );

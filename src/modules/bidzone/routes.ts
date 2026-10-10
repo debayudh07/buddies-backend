@@ -9,7 +9,7 @@ import { haversineKm } from '../../lib/haversine';
 import { computeBidScore } from '../../lib/scoring';
 import { getSupplierBidQuotaInfo } from '../subscriptions/service';
 import { config } from '../../config';
-import { emitAuction, emitUser } from '../../socket';
+import { emitAuction, emitBidzone, emitUser } from '../../socket';
 import { sendPush } from '../../lib/notify';
 import { createOrderFromAcceptedBid, emitOrderChatCreated } from '../orders/service';
 import { assertPaymentBacklog } from '../../lib/payment-backlog';
@@ -739,6 +739,8 @@ bidzoneRouter.post(
       });
     });
 
+    const consumer = await prisma.consumerProfile.findUnique({ where: { id: bidRequest.consumerId } });
+
     emitAuction(bidRequest.id, 'auction.bid_placed', {
       bid,
       liveEndsAt,
@@ -751,8 +753,13 @@ bidzoneRouter.post(
       status: 'active',
       bidRequestId: bidRequest.id,
     });
-
-    const consumer = await prisma.consumerProfile.findUnique({ where: { id: bidRequest.consumerId } });
+    if (consumer) {
+      emitUser(consumer.userId, 'bidRequest.updated', {
+        id: bidRequest.id,
+        status: 'open',
+        reason: 'bid_placed',
+      });
+    }
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateSupplierLists(profile.userId),
@@ -1011,6 +1018,17 @@ bidzoneRouter.post('/supplier/bids/:id/withdraw', authenticate, requireRole('sup
     status: 'withdrawn',
     bidRequestId: bid.bidRequestId,
   });
+  const withdrawnRequest = await prisma.bidRequest.findUnique({
+    where: { id: bid.bidRequestId },
+    select: { consumer: { select: { userId: true } } },
+  });
+  if (withdrawnRequest?.consumer.userId) {
+    emitUser(withdrawnRequest.consumer.userId, 'bidRequest.updated', {
+      id: bid.bidRequestId,
+      status: 'open',
+      reason: 'bid_withdrawn',
+    });
+  }
   await Promise.all([
     invalidateBidzoneFeeds(),
     invalidateSupplierLists(profile.userId),
@@ -1268,6 +1286,10 @@ bidzoneRouter.post(
       status: 'awarded',
       orderId: order.id,
     });
+    emitBidzone('all', 'demand.request_closed', {
+      id: bid.bidRequestId,
+      status: 'awarded',
+    });
     await sendPush({
       userId: bid.supplier.userId,
       title: 'You won the bid',
@@ -1501,6 +1523,10 @@ bidzoneRouter.post(
     }
 
     emitAuction(bidRequestId, 'auction.bid_accepted', { bidIds });
+    emitBidzone('all', 'demand.request_closed', {
+      id: bidRequestId,
+      status: 'awarded',
+    });
     emitUser(bidRequest.consumer.userId, 'bidRequest.updated', {
       id: bidRequestId,
       status: 'awarded',
@@ -1572,6 +1598,12 @@ bidzoneRouter.post('/consumer/bids/:id/reject', authenticate, requireRole('consu
   emitUser(bid.supplier.userId, 'bid.status_changed', {
     bidId: bid.id,
     status: 'rejected',
+    bidRequestId: bid.bidRequestId,
+  });
+  emitUser(bid.bidRequest.consumer.userId, 'bidRequest.updated', {
+    id: bid.bidRequestId,
+    status: 'open',
+    reason: 'bid_rejected',
   });
   await Promise.all([
     invalidateBidzoneFeeds(),

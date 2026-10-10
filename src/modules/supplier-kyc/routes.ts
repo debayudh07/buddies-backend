@@ -8,6 +8,7 @@ import { AppError } from '../../lib/errors';
 import { canonicalizeSupplierCategories } from '../../lib/product-categories';
 import { invalidateSupplierLists } from '../../lib/response-cache';
 import { recordAdminAudit } from '../admin/audit';
+import { emitUser } from '../../socket';
 
 export const kycRouter = Router();
 
@@ -172,6 +173,7 @@ kycRouter.post(
       action: 'kyc.verify',
       target: `supplier:${userId}`,
     });
+    emitUser(userId, 'profile.updated', { kycStatus: 'verified' });
     res.json({ profile });
   },
 );
@@ -191,6 +193,7 @@ kycRouter.post(
       action: 'kyc.reject',
       target: `supplier:${userId}`,
     });
+    emitUser(userId, 'profile.updated', { kycStatus: 'rejected' });
     res.json({ profile });
   },
 );
@@ -227,5 +230,6 @@ kycRouter.post('/supplier/kyc/dev-verify', authenticate, requireRole('supplier')
         },
       });
 
+  emitUser(userId, 'profile.updated', { kycStatus: 'verified' });
   res.json({ profile });
 });

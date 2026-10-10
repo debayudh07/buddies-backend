@@ -326,6 +326,11 @@ demandRouter.post(
       itemCount: bidRequest.items.length,
       productCategories,
     });
+    emitUser(req.user!.id, 'bidRequest.updated', {
+      id: bidRequest.id,
+      status: 'open',
+      reason: 'created',
+    });
 
     // Notify verified suppliers who stock any of this request's categories.
     const matchValues = categoryMatchValues(productCategories);
@@ -841,6 +846,18 @@ demandRouter.post(
     });
 
     emitAuction(bidRequest.id, 'demand.reordered', { id: bidRequest.id });
+    emitBidzone('all', 'demand.request_created', {
+      id: bidRequest.id,
+      batchCode: bidRequest.batchCode,
+      liveEndsAt: bidRequest.liveEndsAt,
+      itemCount: bidRequest.items.length,
+      productCategories: requestProductCategories(bidRequest.items),
+    });
+    emitUser(req.user!.id, 'bidRequest.updated', {
+      id: bidRequest.id,
+      status: 'open',
+      reason: 'reordered',
+    });
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(req.user!.id),

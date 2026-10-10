@@ -187,6 +187,7 @@ async function setSupplierKyc(
     target: `supplier:${userId}`,
     meta: { kycStatus },
   });
+  emitUser(userId, 'profile.updated', { kycStatus });
   return profile;
 }
 
