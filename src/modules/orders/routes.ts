@@ -256,11 +256,10 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
     name: supplier?.ownerName?.trim() || publicSupplierLabel(supplier) || null,
     phone: supplier?.user?.phone ?? null,
   };
+  const restaurantName = consumerProfile?.restaurantName?.trim() || null;
   const consumerContact = {
-    name:
-      consumerProfile?.ownerName?.trim() ||
-      consumerProfile?.restaurantName?.trim() ||
-      null,
+    name: restaurantName || consumerProfile?.ownerName?.trim() || null,
+    restaurantName,
     phone: consumerProfile?.user?.phone ?? null,
   };
   const viewerIsSupplier = order.supplierUserId === userId;
@@ -277,6 +276,8 @@ async function getOrderForUser(orderId: string, userId: string, role: string) {
     supplierContact,
     consumerContact,
     counterparty,
+    consumerLabel: consumerContact.name || 'Buyer',
+    restaurantName,
     bid: order.bid
       ? {
           ...order.bid,
@@ -310,6 +311,7 @@ const listOrderInclude = {
       preferredDeliverBy: true,
       durationHours: true,
       deliveryAddress: true,
+      consumer: { select: { restaurantName: true } },
       items: {
         select: {
           id: true,
@@ -357,6 +359,7 @@ function presentOrder<T extends {
     durationHours?: number | null;
     slaHours?: number | null;
     deliveryAddress?: string | null;
+    consumer?: { restaurantName?: string | null } | null;
     items?: Array<{
       id?: string;
       name: string;
@@ -369,6 +372,8 @@ function presentOrder<T extends {
     }>;
   } | null;
   digitalChallan?: { lineSnapshotJson?: unknown } | null;
+  restaurantName?: string | null;
+  consumerLabel?: string | null;
 }>(order: T) {
   const covered = order.coveredItemIds ?? [];
   const rawItems = order.bidRequest?.items ?? [];
@@ -414,6 +419,14 @@ function presentOrder<T extends {
     bidRequestId: order.bidRequestId ?? order.bidRequest?.id ?? null,
     batchCode: order.bidRequest?.batchCode ?? null,
     supplierLabel: publicSupplierLabel(order.bid?.supplier),
+    restaurantName:
+      order.bidRequest?.consumer?.restaurantName?.trim() ||
+      order.restaurantName?.trim() ||
+      null,
+    consumerLabel:
+      order.bidRequest?.consumer?.restaurantName?.trim() ||
+      order.consumerLabel?.trim() ||
+      null,
   };
 }
 
