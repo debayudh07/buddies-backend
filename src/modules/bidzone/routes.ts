@@ -1318,7 +1318,9 @@ bidzoneRouter.post(
   validateBody(awardPlanSchema),
   async (req, res) => {
     const bidRequestId = requireParam(req, 'id');
-    const { selections, dropUnselected } = req.body as z.infer<typeof awardPlanSchema>;
+    const { selections, dropUnselected: dropUnselectedRaw } = req.body as z.infer<typeof awardPlanSchema>;
+    // Always close leftover items unless the client explicitly keeps the request open.
+    const dropUnselected = dropUnselectedRaw !== false;
     const bidRequest = assertFound(
       await prisma.bidRequest.findUnique({
         where: { id: bidRequestId },
@@ -1543,8 +1545,8 @@ bidzoneRouter.post(
       bindOnAccept: true,
       message:
         presentedOrders.length === 1
-          ? `1 order created for ${presentedOrders[0]?.supplierLabel ?? 'the supplier'}.`
-          : `${presentedOrders.length} orders created — one per supplier.`,
+          ? `1 order created for ${presentedOrders[0]?.supplierLabel ?? 'the supplier'}. This request is now closed.`
+          : `${presentedOrders.length} orders created — one per supplier. This request is now closed.`,
     });
   },
 );
