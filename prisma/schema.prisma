@@ -327,6 +327,8 @@ model BidLineItem {
   amountPaise      Int
   /// Price for 1 requested unit, in paise. Line total = unitPricePaise * quantity.
   unitPricePaise   Int?
+  /// Remaining shelf life promised for this line at delivery (days).
+  rslDaysAtDelivery Int?
   notes            String?
   createdAt        DateTime @default(now())
 

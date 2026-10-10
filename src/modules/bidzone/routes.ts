@@ -362,6 +362,7 @@ const placeBidSchema = z.object({
     bidRequestItemId: z.string().min(1),
     amountPaise: z.coerce.number().int().positive(),
     unitPricePaise: z.coerce.number().int().positive().optional(),
+    rslDaysAtDelivery: z.coerce.number().int().nonnegative().optional(),
     notes: z.string().optional(),
   })).optional(),
 });
@@ -523,21 +524,49 @@ bidzoneRouter.post(
       }
     }
 
-    // Enforce product-doc Minimum RSL matrix for items this bid covers.
+    // Per-item RSL from the category matrix. Bid-level RSL is the lowest line RSL.
     const rules = shelfRulesForItems(coveredItems);
-    if (body.rslDaysAtDelivery < rules.minRslDays) {
-      throw new AppError(
-        400,
-        'RSL_BELOW_MATRIX',
-        `Minimum RSL for the covered items is ${rules.minRslDays} day(s) at delivery (category matrix). You entered ${body.rslDaysAtDelivery}.`,
-      );
-    }
-    if (body.rslDaysAtDelivery > rules.totalShelfLifeDays) {
-      throw new AppError(
-        400,
-        'RSL_EXCEEDS_SHELF',
-        `Remaining shelf life cannot exceed ${rules.totalShelfLifeDays} day(s) for the covered items.`,
-      );
+    let bidRsl = body.rslDaysAtDelivery;
+    if (isItemized) {
+      let minLineRsl = Number.POSITIVE_INFINITY;
+      for (const line of lines) {
+        const item = bidRequest.items.find((i) => i.id === line.bidRequestItemId);
+        const def = getCategoryDef(item?.productCategory);
+        const minRsl = def?.minRslDays ?? 2;
+        const maxShelf = Math.max(def?.totalShelfLifeDays ?? 5, minRsl);
+        const rsl = line.rslDaysAtDelivery ?? body.rslDaysAtDelivery;
+        if (rsl < minRsl) {
+          throw new AppError(
+            400,
+            'RSL_BELOW_MATRIX',
+            `Minimum RSL for ${item?.name ?? 'this item'} is ${minRsl} day(s) at delivery.`,
+          );
+        }
+        if (rsl > maxShelf) {
+          throw new AppError(
+            400,
+            'RSL_EXCEEDS_SHELF',
+            `RSL for ${item?.name ?? 'this item'} cannot exceed ${maxShelf} day(s).`,
+          );
+        }
+        if (rsl < minLineRsl) minLineRsl = rsl;
+      }
+      if (Number.isFinite(minLineRsl)) bidRsl = minLineRsl;
+    } else {
+      if (body.rslDaysAtDelivery < rules.minRslDays) {
+        throw new AppError(
+          400,
+          'RSL_BELOW_MATRIX',
+          `Minimum RSL for the covered items is ${rules.minRslDays} day(s) at delivery (category matrix). You entered ${body.rslDaysAtDelivery}.`,
+        );
+      }
+      if (body.rslDaysAtDelivery > rules.totalShelfLifeDays) {
+        throw new AppError(
+          400,
+          'RSL_EXCEEDS_SHELF',
+          `Remaining shelf life cannot exceed ${rules.totalShelfLifeDays} day(s) for the covered items.`,
+        );
+      }
     }
     const shelfLifeDays = Math.max(body.shelfLifeDays, rules.totalShelfLifeDays);
 
@@ -609,7 +638,7 @@ bidzoneRouter.post(
     const { score, breakdown } = computeBidScore({
       amountPaise: bidAmountPaise,
       budgetPaise: proRatedBudgetPaise,
-      rslDays: body.rslDaysAtDelivery,
+      rslDays: bidRsl,
       minRslDays: rules.minRslDays,
       distanceKm,
       onTimeRate: profile.onTimeRate,
@@ -669,7 +698,7 @@ bidzoneRouter.post(
           amountPaise: bidAmountPaise,
           grade: body.grade,
           shelfLifeDays,
-          rslDaysAtDelivery: body.rslDaysAtDelivery,
+          rslDaysAtDelivery: bidRsl,
           notes: body.notes,
           promisedDeliveryAt,
           score,
@@ -693,6 +722,7 @@ bidzoneRouter.post(
             bidRequestItemId: l.bidRequestItemId,
             amountPaise: l.amountPaise,
             unitPricePaise: l.unitPricePaise ?? null,
+            rslDaysAtDelivery: l.rslDaysAtDelivery ?? bidRsl,
             notes: l.notes || null,
           })),
         });

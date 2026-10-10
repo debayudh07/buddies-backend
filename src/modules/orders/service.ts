@@ -113,7 +113,7 @@ async function insertOrderFromBid(
               catalogItemSlug: i.catalogItemSlug,
               packSize: i.packSize,
               grade: bid.grade,
-              rslDaysAtDelivery: bid.rslDaysAtDelivery,
+              rslDaysAtDelivery: line?.rslDaysAtDelivery ?? bid.rslDaysAtDelivery,
               amountPaise: amount,
               lineTotalPaise: amount,
               isWinningBidTotal: line ? true : idx === 0,
