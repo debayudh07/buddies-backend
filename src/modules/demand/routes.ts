@@ -8,13 +8,13 @@ import { AppError, assertFound } from '../../lib/errors';
 import { config } from '../../config';
 import { emitAuction, emitBidzone, emitUser } from '../../socket';
 import { publicSupplierLabel } from '../../lib/user-present';
-import { notifyMany } from '../../lib/notify';
+import { sendPush } from '../../lib/notify';
 import {
   categorySlugs,
   normalizeProductCategory,
   requestProductCategories,
   categoryMatchValues,
-  getCategoryDef,
+  supplierStocksCategory,
 } from '../../lib/product-categories';
 import {
   assertCartRule,
@@ -219,6 +219,57 @@ function canEditMeta(status: string, liveEndsAt: Date, now = new Date()) {
 
 export const demandRouter = Router();
 
+type DemandNotifyItem = { name: string; productCategory?: string | null };
+
+/** Push copy listing only the lines this supplier stocks. Null when nothing matches. */
+function stockedDemandBody(
+  items: DemandNotifyItem[],
+  supplierCategories: string[],
+): string | null {
+  const names = [
+    ...new Set(
+      items
+        .filter((item) => supplierStocksCategory(supplierCategories, item.productCategory))
+        .map((item) => item.name.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (names.length === 0) return null;
+  const shown = names.slice(0, 3);
+  const more = names.length - shown.length;
+  const list = more > 0 ? `${shown.join(', ')} +${more} more` : shown.join(', ');
+  return `New bid for ${list}`;
+}
+
+/** FCM only to verified suppliers who stock at least one line, worded for their stock. */
+async function notifySuppliersForDemand(bidRequest: {
+  id: string;
+  items: DemandNotifyItem[];
+}) {
+  const matchValues = categoryMatchValues(requestProductCategories(bidRequest.items));
+  if (matchValues.length === 0) return;
+  const suppliers = await prisma.supplierProfile.findMany({
+    where: {
+      kycStatus: 'verified',
+      categories: { hasSome: matchValues },
+    },
+    select: { userId: true, categories: true },
+    take: 200,
+  });
+  await Promise.all(
+    suppliers.map((supplier) => {
+      const body = stockedDemandBody(bidRequest.items, supplier.categories);
+      if (!body) return Promise.resolve();
+      return sendPush({
+        userId: supplier.userId,
+        title: 'New Bidzone demand',
+        body,
+        data: { bidRequestId: bidRequest.id, type: 'bid' },
+      });
+    }),
+  );
+}
+
 function batchCode() {
   const n = Math.floor(Math.random() * 9000) + 1000;
   return `RI-${n}`;
@@ -332,35 +383,7 @@ demandRouter.post(
       reason: 'created',
     });
 
-    // Notify verified suppliers who stock any of this request's categories.
-    const matchValues = categoryMatchValues(productCategories);
-    const labels = productCategories
-      .map((c) => getCategoryDef(c)?.label ?? c)
-      .slice(0, 2);
-    const pushBody =
-      labels.length > 0
-        ? `New ${labels.join(' + ')} bid nearby`
-        : `Batch ${bidRequest.batchCode} is open nearby`;
-    void prisma.supplierProfile
-      .findMany({
-        where: {
-          kycStatus: 'verified',
-          ...(matchValues.length > 0
-            ? { categories: { hasSome: matchValues } }
-            : { id: { in: [] } }),
-        },
-        select: { userId: true },
-        take: 100,
-      })
-      .then((suppliers) =>
-        notifyMany(
-          suppliers.map((s) => s.userId),
-          'New Bidzone demand',
-          pushBody,
-          { bidRequestId: bidRequest.id, type: 'bid' },
-        ),
-      )
-      .catch(() => undefined);
+    void notifySuppliersForDemand(bidRequest).catch(() => undefined);
 
     await Promise.all([
       invalidateBidzoneFeeds(),
@@ -858,6 +881,7 @@ demandRouter.post(
       status: 'open',
       reason: 'reordered',
     });
+    void notifySuppliersForDemand(bidRequest).catch(() => undefined);
     await Promise.all([
       invalidateBidzoneFeeds(),
       invalidateConsumerLists(req.user!.id),
