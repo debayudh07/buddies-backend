@@ -199,17 +199,17 @@ model ConsumerProfile {
 }
 
 model Address {
-  id         String   @id @default(uuid())
-  consumerId String
-  label      String
+  id            String   @id @default(uuid())
+  consumerId    String
+  label         String
   recipientName String?
-  phone      String?
-  line       String
-  city       String?
-  lat        Float?
-  lng        Float?
-  isDefault  Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  phone         String?
+  line          String
+  city          String?
+  lat           Float?
+  lng           Float?
+  isDefault     Boolean  @default(false)
+  createdAt     DateTime @default(now())
 
   consumer ConsumerProfile @relation(fields: [consumerId], references: [id], onDelete: Cascade)
 }
@@ -322,17 +322,17 @@ model BidRequestItem {
 }
 
 model BidLineItem {
-  id               String   @id @default(uuid())
-  bidId            String
-  bidRequestItemId String
+  id                String   @id @default(uuid())
+  bidId             String
+  bidRequestItemId  String
   /// Price for this specific item (total for the requested quantity)
-  amountPaise      Int
+  amountPaise       Int
   /// Price for 1 requested unit, in paise. Line total = unitPricePaise * quantity.
-  unitPricePaise   Int?
+  unitPricePaise    Int?
   /// Remaining shelf life promised for this line at delivery (days).
   rslDaysAtDelivery Int?
-  notes            String?
-  createdAt        DateTime @default(now())
+  notes             String?
+  createdAt         DateTime @default(now())
 
   bid            Bid            @relation(fields: [bidId], references: [id], onDelete: Cascade)
   bidRequestItem BidRequestItem @relation(fields: [bidRequestItemId], references: [id], onDelete: Cascade)
@@ -424,14 +424,14 @@ model Order {
 /// finish post-Preparing steps (map, arrived, payment, close) without a shop
 /// login. Token is scoped to that one order and expires with the order.
 model OrderHandoff {
-  id              String    @id @default(uuid())
-  orderId         String
-  supplierUserId  String
-  tokenHash       String    @unique
-  expiresAt       DateTime
-  revokedAt       DateTime?
-  lastUsedAt      DateTime?
-  createdAt       DateTime  @default(now())
+  id             String    @id @default(uuid())
+  orderId        String
+  supplierUserId String
+  tokenHash      String    @unique
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  lastUsedAt     DateTime?
+  createdAt      DateTime  @default(now())
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
