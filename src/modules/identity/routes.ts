@@ -245,6 +245,8 @@ identityRouter.post(
 
 const addressSchema = z.object({
   label: z.string().min(1),
+  recipientName: z.string().trim().max(100).optional(),
+  phone: z.string().trim().max(20).optional(),
   line: z.string().min(1),
   city: z.string().optional(),
   // Coerce so JSON integers from some clients still pass.

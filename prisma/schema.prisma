@@ -202,6 +202,8 @@ model Address {
   id         String   @id @default(uuid())
   consumerId String
   label      String
+  recipientName String?
+  phone      String?
   line       String
   city       String?
   lat        Float?
